@@ -57,6 +57,23 @@ Builds:
       - app/src/main/java/com/privateai/camera/bridge/GemmaModelManager.kt
     ndk: r27c
 
+  - versionName: 2.1.0
+    versionCode: 10
+    commit: v2.1.0
+    subdir: app
+    gradle:
+      - fdroid
+    rm:
+      - keystore.properties
+    scanignore:
+      # Gemma model fetch URL (downloaded at runtime, not bundled).
+      - app/src/main/java/com/privateai/camera/bridge/GemmaModelManager.kt
+      # Tesseract OCR language data files (~5–15 MB each) fetched at runtime
+      # from the upstream `tessdata_fast` repo on first use. Replaces ML Kit
+      # Text Recognition — same on-demand pattern as the AI model above.
+      - app/src/main/java/com/privateai/camera/service/TesseractDataManager.kt
+    ndk: r27c
+
 # Anti-features F-Droid users should know about. The on-device AI model is
 # downloaded at runtime from HuggingFace, which is what NonFreeNet flags —
 # Privora's *behaviour* is fully local but the initial model fetch hits a
@@ -64,16 +81,21 @@ Builds:
 AntiFeatures:
   - NonFreeNet:
       en-US: >-
-        On first enable of the AI Assistant feature, the app downloads a
-        ~2.5 GB Gemma 4 model file from Hugging Face. This is a one-shot,
-        user-initiated network operation; all subsequent AI inference
-        runs entirely on-device with no further network access. The model
-        weights themselves are released under the Apache-2.0-compatible
-        Gemma Terms of Use; not all of Hugging Face's serving infrastructure
-        is free software, hence the flag.
+        Two optional, user-initiated downloads. (1) On first enable of the
+        AI Assistant feature, the app downloads a ~2.7 GB Gemma 4 model
+        file from Hugging Face. (2) Per-language OCR — the user picks a
+        language in Settings and the app downloads the matching
+        ~5–15 MB .traineddata file from the upstream tesseract-ocr
+        tessdata_fast repository on GitHub. Both downloads run via Android
+        DownloadManager and are clearly gated behind explicit user actions.
+        All subsequent AI inference and OCR run entirely on-device with no
+        further network access. The model weights and OCR data are
+        released under Apache-2.0-compatible licenses; not all of
+        Hugging Face / GitHub's serving infrastructure is free software,
+        hence the flag.
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
 UpdateCheckName: privora
-CurrentVersion: 2.0.5
-CurrentVersionCode: 7
+CurrentVersion: 2.1.0
+CurrentVersionCode: 10
