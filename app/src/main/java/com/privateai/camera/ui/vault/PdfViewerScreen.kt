@@ -32,11 +32,22 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.IosShare
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Summarize
+import androidx.compose.material.icons.filled.TextSnippet
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -82,7 +93,15 @@ import java.io.File
 fun PdfViewerScreen(
     pdfFile: File,
     title: String,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onAskAssistant: (() -> Unit)? = null,
+    onSummarize: (() -> Unit)? = null,
+    onViewExtractedText: (() -> Unit)? = null,
+    onRename: ((String) -> Unit)? = null,
+    onExtractText: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    /** Pair of (currentPage, totalPages) while OCR extraction runs; null when idle. */
+    extractionProgress: Pair<Int, Int>? = null
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -193,22 +212,173 @@ fun PdfViewerScreen(
                     modifier = Modifier.align(Alignment.Center)
                 )
             }
-            IconButton(
-                onClick = {
-                    try {
-                        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile)
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "application/pdf"
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // Right side: share + (optionally) overflow menu with AI actions.
+            // When the document has an OCR sidecar, the host wires onAskAssistant
+            // / onSummarize and we surface the overflow. Otherwise just Share.
+            val hasAiActions = onAskAssistant != null || onSummarize != null ||
+                onViewExtractedText != null || onRename != null || onExtractText != null ||
+                onDelete != null
+            if (hasAiActions) {
+                var menuOpen by remember { mutableStateOf(false) }
+                var showRenameDialog by remember { mutableStateOf(false) }
+                Box(modifier = Modifier.align(Alignment.CenterEnd)) {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Default.MoreVert, stringResource(R.string.action_more), tint = Color.White)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        if (onRename != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.vault_rename)) },
+                                leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                onClick = { menuOpen = false; showRenameDialog = true }
+                            )
                         }
-                        context.startActivity(Intent.createChooser(send, context.getString(R.string.share_pdf)))
-                    } catch (_: Exception) {}
-                },
-                modifier = Modifier.align(Alignment.CenterEnd)
-            ) {
-                Icon(Icons.Default.IosShare, stringResource(R.string.share_pdf), tint = Color.White)
+                        if (onSummarize != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.assistant_summarize)) },
+                                leadingIcon = { Icon(Icons.Default.Summarize, null) },
+                                onClick = { menuOpen = false; onSummarize() }
+                            )
+                        }
+                        if (onExtractText != null) {
+                            // Only present when the doc has no OCR sidecar yet —
+                            // host sets this to null otherwise (so Summarize / Ask
+                            // / View extracted text take over).
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.assistant_extract_text)) },
+                                leadingIcon = { Icon(Icons.Default.TextSnippet, null) },
+                                onClick = { menuOpen = false; onExtractText() }
+                            )
+                        }
+                        if (onAskAssistant != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.assistant_ask)) },
+                                leadingIcon = { Icon(Icons.Default.AutoAwesome, null) },
+                                onClick = { menuOpen = false; onAskAssistant() }
+                            )
+                        }
+                        if (onViewExtractedText != null) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.assistant_view_extracted_text)) },
+                                leadingIcon = { Icon(Icons.Default.TextSnippet, null) },
+                                onClick = { menuOpen = false; onViewExtractedText() }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.share_pdf)) },
+                            leadingIcon = { Icon(Icons.Default.IosShare, null) },
+                            onClick = {
+                                menuOpen = false
+                                try {
+                                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile)
+                                    val send = Intent(Intent.ACTION_SEND).apply {
+                                        type = "application/pdf"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(send, context.getString(R.string.share_pdf)))
+                                } catch (_: Exception) {}
+                            }
+                        )
+                        // Delete — kept at the bottom of the menu (destructive
+                        // action). The host shows the shared confirm dialog,
+                        // moves the doc to trash, and pops back to the gallery
+                        // — same path the photo viewer uses.
+                        if (onDelete != null) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        stringResource(R.string.delete),
+                                        color = androidx.compose.material3.MaterialTheme.colorScheme.error
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        null,
+                                        tint = androidx.compose.material3.MaterialTheme.colorScheme.error
+                                    )
+                                },
+                                onClick = {
+                                    menuOpen = false
+                                    onDelete()
+                                }
+                            )
+                        }
+                    }
+                }
+                if (showRenameDialog && onRename != null) {
+                    // Strip the .pdf hint from the displayed name so the user
+                    // edits the readable part. The repo re-attaches the
+                    // extension on save (so the file type detection still works).
+                    val initial = title.removeSuffix(".pdf").removeSuffix(".PDF")
+                    var newName by remember(initial) { mutableStateOf(initial) }
+                    AlertDialog(
+                        onDismissRequest = { showRenameDialog = false },
+                        title = { Text(stringResource(R.string.vault_rename_dialog_title)) },
+                        text = {
+                            OutlinedTextField(
+                                value = newName,
+                                onValueChange = { newName = it },
+                                singleLine = true,
+                                label = { Text(stringResource(R.string.vault_rename_label)) }
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                enabled = newName.isNotBlank() && newName != initial,
+                                onClick = {
+                                    showRenameDialog = false
+                                    onRename(newName)
+                                }
+                            ) { Text(stringResource(R.string.totp_save)) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showRenameDialog = false }) {
+                                Text(stringResource(R.string.cancel))
+                            }
+                        }
+                    )
+                }
+            } else {
+                IconButton(
+                    onClick = {
+                        try {
+                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", pdfFile)
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "application/pdf"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(send, context.getString(R.string.share_pdf)))
+                        } catch (_: Exception) {}
+                    },
+                    modifier = Modifier.align(Alignment.CenterEnd)
+                ) {
+                    Icon(Icons.Default.IosShare, stringResource(R.string.share_pdf), tint = Color.White)
+                }
             }
+        }
+
+        // Extraction progress overlay — non-dismissible while the OCR
+        // fallback runs (which can take many seconds for image-only PDFs).
+        // For the fast PdfBox path the host typically goes from null →
+        // (1,1) → null almost instantly, so this dialog flashes briefly.
+        extractionProgress?.let { (current, total) ->
+            AlertDialog(
+                onDismissRequest = { /* not dismissible during extraction */ },
+                title = { Text(stringResource(R.string.assistant_extracting_title)) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(stringResource(R.string.assistant_extracting_page, current, total))
+                        androidx.compose.material3.LinearProgressIndicator(
+                            progress = { if (total > 0) current.toFloat() / total else 0f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {}
+            )
         }
     }
 }

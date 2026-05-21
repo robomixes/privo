@@ -241,8 +241,11 @@ fun NoteEditorScreen(
     val localChecker = remember { LocalGrammarChecker(context) }
     val systemChecker = remember { SystemSpellChecker(context) }
 
-    // AI Assistant state
-    val aiAvailable = remember { com.privateai.camera.bridge.GemmaRunner.isAvailable(context) }
+    // AI Assistant state — gated on the single AiStatus source of truth.
+    // When AI isn't READY the sparkle menu items don't render at all; that
+    // way the user doesn't see seven disabled actions in a row.
+    val aiStatus by com.privateai.camera.bridge.rememberAiStatus()
+    val aiAvailable = aiStatus.isReady
     var showAiSheet by remember { mutableStateOf(false) }
     var aiProcessing by remember { mutableStateOf(false) }
     var aiResult by remember { mutableStateOf<String?>(null) }

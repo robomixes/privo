@@ -95,6 +95,8 @@ fun HomeTabsLayout(
     onAssistantClick: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
+    val aiStatus by com.privateai.camera.bridge.rememberAiStatus()
+    val aiReady = aiStatus.isReady
     // Session flag — true when ANY session is active (normal unlock OR duress)
     // so the lock button is shown and the user can always re-lock to escape duress.
     var hasActiveSession by remember { mutableStateOf(VaultLockManager.isUnlockedWithinGrace(context)) }
@@ -163,9 +165,18 @@ fun HomeTabsLayout(
             TopAppBar(
                 title = { Text(stringResource(R.string.app_name_home)) },
                 actions = {
-                    // ✨ AI Assistant — only when AI available + vault unlocked + not duress
-                    if (isVaultUnlocked
-                        && com.privateai.camera.bridge.GemmaRunner.isAvailable(context)
+                    // ✨ AI Assistant — visible when AI available + not duress.
+                    // Mirrors the grid layout: when the Settings "Allow
+                    // Assistant without unlocking vault" toggle is on, the
+                    // icon is also shown while the vault is locked (the
+                    // assistant itself enforces the locked-vault read gate;
+                    // surfacing it lets the user start chatting without
+                    // unlocking first).
+                    val assistantUnlockedAccess = remember(isVaultUnlocked) {
+                        com.privateai.camera.ui.settings.isAssistantUnlockedAccessEnabled(context)
+                    }
+                    if ((isVaultUnlocked || assistantUnlockedAccess)
+                        && aiReady
                         && !com.privateai.camera.security.VaultLockManager.isDuressActive
                         && onAssistantClick != null
                     ) {
@@ -290,7 +301,8 @@ private fun DailyTipCard(isVaultUnlocked: Boolean) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     // Locked → always use static pool. Unlocked + AI available → AI tip.
-    val canUseAi = isVaultUnlocked && com.privateai.camera.bridge.GemmaRunner.isAvailable(context)
+    val aiStatus by com.privateai.camera.bridge.rememberAiStatus()
+    val canUseAi = isVaultUnlocked && aiStatus.isReady
 
     // Initial state
     val initialCategory = remember { pickCategoryForHour() }

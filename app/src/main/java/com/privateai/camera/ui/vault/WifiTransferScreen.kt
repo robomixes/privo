@@ -128,9 +128,14 @@ fun WifiTransferScreen(onBack: () -> Unit) {
                     // ALL files go to the Received folder regardless of type
                     when {
                         mimeType.startsWith("image/") -> {
+                            // Pull full EXIF metadata BEFORE BitmapFactory
+                            // strips it (date, dimensions, orientation, GPS).
+                            // The vault stores it as an encrypted sidecar so
+                            // the saved JPEG itself stays metadata-free.
+                            val meta = com.privateai.camera.util.ExifUtils.readMetadata(bytes)
                             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             if (bitmap != null) {
-                                vault.savePhotoToFolder(bitmap, receivedDir)
+                                vault.savePhotoToFolder(bitmap, receivedDir, metadata = meta)
                                 bitmap.recycle()
                                 null
                             } else "Failed to decode image"

@@ -3,6 +3,7 @@
 
 package com.privateai.camera.ui.scanner
 
+import com.privateai.camera.R
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
@@ -11,14 +12,12 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
+import android.util.Log
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -69,15 +68,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -110,44 +102,28 @@ fun ScannerScreen(onBack: (() -> Unit)? = null) {
     var isProcessingOcr by remember { mutableStateOf(false) }
     var showOcrResult by remember { mutableStateOf(false) }
 
+    // Smart Scanner — Gemma classifies the saved doc and proposes a
+    // filename + folder. Loading flips true while analyze runs; suggestion
+    // populated after parse; pendingSavedFile is the encrypted .pdf.enc the
+    // user accepts/renames/moves from the sheet.
+    var smartScanLoading by remember { mutableStateOf(false) }
+    var smartScanSuggestion by remember { mutableStateOf<com.privateai.camera.bridge.ScannerAi.Suggestion?>(null) }
+    var pendingSavedFile by remember { mutableStateOf<java.io.File?>(null) }
+
     // Encrypted vault
     val crypto = remember { CryptoManager(context).also { it.initialize() } }
     val vault = remember { VaultRepository(context, crypto) }
+    val folderManager = remember { com.privateai.camera.security.FolderManager(context, crypto) }
 
-    val scannerOptions = remember {
-        GmsDocumentScannerOptions.Builder()
-            .setGalleryImportAllowed(true)
-            .setPageLimit(10)
-            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
-            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-            .build()
-    }
-    val scanner = remember { GmsDocumentScanning.getClient(scannerOptions) }
+    // Track A2: replaced ML Kit's `GmsDocumentScanning` activity with
+    // Privora's own CameraX-based capture flow + manual corner-drag
+    // perspective correction (see ScannerCaptureScreen). The intent
+    // launcher / scanner client are gone; we toggle an in-place
+    // composable instead so back-press works the same and ML Kit's
+    // play-services dep can leave the build entirely.
+    var showCaptureFlow by remember { mutableStateOf(false) }
 
-    val scannerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
-        scanResult?.pages?.let { pages ->
-            scannedPages = pages.map { it.imageUri }
-            currentPageIndex = 0
-            ocrText = null
-            showOcrResult = false
-            if (pages.isNotEmpty()) {
-                displayBitmap = loadAndEnhanceBitmap(context, pages[0].imageUri, enhancementMode)
-            }
-        }
-    }
-
-    fun startScan() {
-        scanner.getStartScanIntent(context as android.app.Activity)
-            .addOnSuccessListener { intentSender ->
-                scannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
-            }
-            .addOnFailureListener { e ->
-                Toast.makeText(context, "Scanner error: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
-    }
+    fun startScan() { showCaptureFlow = true }
 
     fun switchPage(index: Int) {
         if (index in scannedPages.indices) {
@@ -163,10 +139,16 @@ fun ScannerScreen(onBack: (() -> Unit)? = null) {
         isProcessingOcr = true
         scope.launch {
             try {
-                val image = InputImage.fromBitmap(bitmap, 0)
-                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-                val result = recognizer.process(image).await()
-                ocrText = result.text
+                // Track A1.3: ML Kit text-recognition → Tesseract 5.
+                // We OCR with whichever languages the user has downloaded
+                // via Settings → OCR languages. If none, the recognizer
+                // returns empty and we surface a helpful pointer.
+                val text = com.privateai.camera.bridge.TesseractRecognizer
+                    .recognizeInstalledLanguages(context, bitmap)
+                ocrText = if (text.isBlank() &&
+                    !com.privateai.camera.bridge.TesseractRecognizer.hasAnyLanguage(context)) {
+                    context.getString(R.string.scanner_ocr_no_languages)
+                } else text
                 showOcrResult = true
             } catch (e: Exception) {
                 ocrText = "OCR failed: ${e.message}"
@@ -294,6 +276,26 @@ fun ScannerScreen(onBack: (() -> Unit)? = null) {
                 }
             }
         }
+    }
+
+    // Render the capture flow full-screen while it's active; on Done it
+    // hands back the captured page URIs (same shape ML Kit used to give us)
+    // and we fall through to the existing page-display + enhance + save UI.
+    if (showCaptureFlow) {
+        ScannerCaptureScreen(
+            onDone = { uris ->
+                if (uris.isNotEmpty()) {
+                    scannedPages = uris
+                    currentPageIndex = 0
+                    ocrText = null
+                    showOcrResult = false
+                    displayBitmap = loadAndEnhanceBitmap(context, uris[0], enhancementMode)
+                }
+                showCaptureFlow = false
+            },
+            onCancel = { showCaptureFlow = false }
+        )
+        return
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -507,9 +509,78 @@ fun ScannerScreen(onBack: (() -> Unit)? = null) {
                                         pdfDocument.close()
                                         out.toByteArray()
                                     }
-                                    vault.saveFile(pdfBytes, "scan_${System.currentTimeMillis()}.pdf", VaultCategory.SCAN)
+                                    val pdfFilename = "scan_${System.currentTimeMillis()}.pdf"
+                                    val savedFile = vault.saveFile(pdfBytes, pdfFilename, VaultCategory.SCAN)
+
+                                    // OCR every page and write an encrypted sidecar so the
+                                    // Assistant can answer questions about this document.
+                                    // Best-effort: failures here don't block the PDF save.
+                                    // Track A1.3: now uses Tesseract 5 across whichever
+                                    // languages the user has downloaded — multi-script
+                                    // (Arabic + English in the same doc, etc.) just works.
+                                    try {
+                                        val perPage = mutableListOf<String>()
+                                        for (i in scannedPages.indices) {
+                                            val pageBmp = loadAndEnhanceBitmap(context, scannedPages[i], enhancementMode) ?: continue
+                                            try {
+                                                val res = com.privateai.camera.bridge.TesseractRecognizer
+                                                    .recognizeInstalledLanguages(context, pageBmp)
+                                                perPage.add(res)
+                                            } catch (e: Exception) {
+                                                Log.w("ScannerScreen", "OCR failed on page ${i+1}: ${e.message}")
+                                                perPage.add("")
+                                            } finally {
+                                                pageBmp.recycle()
+                                            }
+                                        }
+                                        val fullText = perPage.joinToString("\n\n").trim()
+                                        // With Tesseract we no longer need the
+                                        // Latin-only sanity gate — the user picks
+                                        // which languages to install, so the
+                                        // output script is by definition something
+                                        // the engine knows how to read. Any
+                                        // non-empty result is worth saving.
+                                        if (fullText.isNotEmpty()) {
+                                            val sidecarId = savedFile.name.removeSuffix(".pdf.enc")
+                                            vault.saveOcrSidecar(sidecarId, savedFile.parentFile!!, fullText, perPage)
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.w("ScannerScreen", "OCR sidecar pass failed: ${e.message}")
+                                    }
+
                                     withContext(Dispatchers.Main) {
                                         Toast.makeText(context, "PDF saved to vault (${scannedPages.size} pages)", Toast.LENGTH_SHORT).show()
+                                    }
+
+                                    // Smart Scanner — only when the user has it enabled in
+                                    // Settings AND Gemma is loaded. Trigger on the first
+                                    // page bitmap (already in memory from the enhancement
+                                    // loop) so the analyze call is a single ~5s GPU pass.
+                                    if (isSmartScanEnabled(context) &&
+                                        com.privateai.camera.bridge.GemmaRunner.isAvailable(context)) {
+                                        withContext(Dispatchers.Main) {
+                                            smartScanLoading = true
+                                            pendingSavedFile = savedFile
+                                        }
+                                        try {
+                                            val firstPageBmp = loadAndEnhanceBitmap(context, scannedPages[0], enhancementMode)
+                                            if (firstPageBmp != null) {
+                                                val folders = folderManager.listAllFolders().map { it.name }
+                                                val suggestion = com.privateai.camera.bridge.ScannerAi.analyze(
+                                                    context, firstPageBmp, folders
+                                                )
+                                                firstPageBmp.recycle()
+                                                withContext(Dispatchers.Main) {
+                                                    smartScanLoading = false
+                                                    smartScanSuggestion = suggestion
+                                                }
+                                            } else {
+                                                withContext(Dispatchers.Main) { smartScanLoading = false }
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.w("ScannerScreen", "Smart scan failed: ${e.message}")
+                                            withContext(Dispatchers.Main) { smartScanLoading = false }
+                                        }
                                     }
                                 } catch (e: Exception) {
                                     withContext(Dispatchers.Main) {
@@ -593,6 +664,90 @@ fun ScannerScreen(onBack: (() -> Unit)? = null) {
     }
 
     } // Scaffold
+
+    // Smart Scanner bottom sheet — shown while Gemma is analyzing or after
+    // a parsed suggestion arrives. Accept renames + moves the saved PDF.
+    val activeSuggestion = smartScanSuggestion
+    val activeFile = pendingSavedFile
+    if (smartScanLoading || (activeSuggestion != null && activeFile != null)) {
+        SmartScanSheet(
+            loading = smartScanLoading,
+            suggestion = activeSuggestion,
+            existingFolders = remember(activeSuggestion) {
+                folderManager.listAllFolders().map { it.name }.sorted()
+            },
+            onAccept = { editedTitle, pickedFolder ->
+                val file = pendingSavedFile
+                if (file != null) {
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            // Reconstruct a VaultPhoto handle for the saved PDF.
+                            val id = file.name.removeSuffix(".pdf.enc")
+                            val photo = com.privateai.camera.security.VaultPhoto(
+                                id = id,
+                                timestamp = file.lastModified(),
+                                category = com.privateai.camera.security.VaultCategory.SCAN,
+                                encryptedFile = file,
+                                thumbnailFile = file,
+                                mediaType = com.privateai.camera.security.VaultMediaType.PDF
+                            )
+                            // Rename. Pass the raw user-typed title — renameItem
+                            // strips path-illegal chars + appends .pdf for PDFs
+                            // (so the user typing "Receipt 2024" lands as
+                            // "Receipt 2024.pdf"; spaces are preserved).
+                            val renamed = editedTitle.trim().takeIf { it.isNotBlank() }?.let { newName ->
+                                val result = vault.renameItem(photo, newName)
+                                android.util.Log.i("ScannerScreen", "Smart-scan rename '${photo.id}' → '$newName' result=$result")
+                                (result as? com.privateai.camera.security.VaultRepository.RenameResult.Success)?.updated
+                            } ?: photo
+                            // Destination: null = stay in Scan album; otherwise
+                            // find/create folder and move.
+                            val folderName = pickedFolder?.trim()?.takeIf { it.isNotBlank() }
+                            val finalDestination: String = if (folderName != null) {
+                                val existing = folderManager.listAllFolders()
+                                    .firstOrNull { it.name.equals(folderName, ignoreCase = true) }
+                                val target = existing ?: folderManager.createFolder(folderName, parentId = null)
+                                vault.moveToFolder(renamed, folderManager.getFolderDir(target.id))
+                                target.name
+                            } else {
+                                // Stay in Scan album — no move.
+                                context.getString(R.string.smart_scan_scan_album)
+                            }
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(
+                                    context,
+                                    context.getString(R.string.smart_scan_saved_to, finalDestination),
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.w("ScannerScreen", "Smart-scan apply failed: ${e.message}")
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, "Couldn't apply suggestions", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        withContext(Dispatchers.Main) {
+                            smartScanSuggestion = null
+                            pendingSavedFile = null
+                        }
+                    }
+                } else {
+                    smartScanSuggestion = null
+                }
+            },
+            onDismiss = {
+                smartScanLoading = false
+                smartScanSuggestion = null
+                pendingSavedFile = null
+            }
+        )
+    }
+}
+
+/** Setting accessor for the smart-scan opt-in. */
+internal fun isSmartScanEnabled(context: android.content.Context): Boolean {
+    return context.getSharedPreferences("app_settings", android.content.Context.MODE_PRIVATE)
+        .getBoolean("smart_scan_enabled", false)
 }
 
 private fun loadAndEnhanceBitmap(

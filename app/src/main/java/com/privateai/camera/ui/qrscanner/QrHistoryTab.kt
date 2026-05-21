@@ -54,7 +54,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.google.mlkit.vision.barcode.common.Barcode
 
 @Composable
 fun QrHistoryTab(
@@ -212,17 +211,17 @@ private fun HistoryItemCard(
 
 private fun getHistoryTypeIcon(valueType: Int): ImageVector {
     return when (valueType) {
-        Barcode.TYPE_URL -> Icons.Default.Link
-        Barcode.TYPE_WIFI -> Icons.Default.Wifi
-        Barcode.TYPE_EMAIL -> Icons.Default.Email
-        Barcode.TYPE_PHONE -> Icons.Default.Phone
-        Barcode.TYPE_SMS -> Icons.Default.Sms
-        Barcode.TYPE_GEO -> Icons.Default.LocationOn
-        Barcode.TYPE_CONTACT_INFO -> Icons.Default.ContactPhone
-        Barcode.TYPE_CALENDAR_EVENT -> Icons.Default.CalendarMonth
-        Barcode.TYPE_ISBN -> Icons.Default.MenuBook
-        Barcode.TYPE_PRODUCT -> Icons.Default.ShoppingCart
-        Barcode.TYPE_TEXT -> Icons.Default.TextFields
+        BarcodeType.URL -> Icons.Default.Link
+        BarcodeType.WIFI -> Icons.Default.Wifi
+        BarcodeType.EMAIL -> Icons.Default.Email
+        BarcodeType.PHONE -> Icons.Default.Phone
+        BarcodeType.SMS -> Icons.Default.Sms
+        BarcodeType.GEO -> Icons.Default.LocationOn
+        BarcodeType.CONTACT_INFO -> Icons.Default.ContactPhone
+        BarcodeType.CALENDAR_EVENT -> Icons.Default.CalendarMonth
+        BarcodeType.ISBN -> Icons.Default.MenuBook
+        BarcodeType.PRODUCT -> Icons.Default.ShoppingCart
+        BarcodeType.TEXT -> Icons.Default.TextFields
         else -> Icons.Default.Code
     }
 }

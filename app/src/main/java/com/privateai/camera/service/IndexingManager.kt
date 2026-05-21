@@ -118,6 +118,12 @@ object IndexingManager {
                 Log.e(TAG, "Indexing failed: ${e.message}")
             } finally {
                 _isRunning.value = false
+                // ONNX indexer just finished — Gemma was holding off while
+                // this ran. Tell GemmaIndexingManager to pick up its queue
+                // now if there's any pending work.
+                try {
+                    GemmaIndexingManager.tryDrain(context)
+                } catch (_: Exception) {}
             }
         }
     }

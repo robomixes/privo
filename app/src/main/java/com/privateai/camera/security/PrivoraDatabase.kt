@@ -52,12 +52,21 @@ class PrivoraDatabase private constructor(context: Context, crypto: CryptoManage
             feature_vector BLOB,
             blur_score REAL DEFAULT 0,
             indexed_at INTEGER DEFAULT 0,
-            description TEXT DEFAULT ''
+            description TEXT DEFAULT '',
+            updated_at INTEGER DEFAULT 0
         )""")
 
         // Migration: add description column if missing (existing installs)
         try {
             db.execSQL("ALTER TABLE photo_index ADD COLUMN description TEXT DEFAULT ''")
+        } catch (_: Exception) { /* column already exists */ }
+
+        // Migration: add updated_at column. Tracks the last time the user
+        // edited a photo (rotate / crop / filter / sticker). Sort modes
+        // UPDATED_DESC / UPDATED_ASC read this; 0 means "never edited"
+        // and falls back to file.lastModified() (= creation date).
+        try {
+            db.execSQL("ALTER TABLE photo_index ADD COLUMN updated_at INTEGER DEFAULT 0")
         } catch (_: Exception) { /* column already exists */ }
 
         db.execSQL("""CREATE TABLE IF NOT EXISTS face_entries (

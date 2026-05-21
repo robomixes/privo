@@ -107,6 +107,24 @@ data class KnowledgeSnapshot(
         private val dateTimeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
 
         /**
+         * Empty snapshot used by the AI Assistant when the vault is locked.
+         * The model sees `{}` as the snapshot JSON; no encrypted-data reads
+         * happen. `today` stays populated so the model still knows the date.
+         */
+        fun empty(): KnowledgeSnapshot = KnowledgeSnapshot(
+            today = dateFmt.format(java.util.Date()),
+            selfName = "",
+            reminders = emptyList(),
+            recentExpenses = emptyList(),
+            expenseTotals30d = emptyMap(),
+            recentNotes = emptyList(),
+            medications = emptyList(),
+            habits = emptyList(),
+            healthLast7 = emptyList(),
+            familyProfileNames = emptyList()
+        )
+
+        /**
          * Build the snapshot from all repos. Runs on the calling dispatcher
          * (should be IO). Takes ~10–50 ms.
          */

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Anas
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package com.privateai.camera.ui.insights
+package com.privateai.camera.ui.health
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,6 +46,7 @@ import com.privateai.camera.R
 import com.privateai.camera.security.InsightsRepository
 import com.privateai.camera.security.Medication
 import com.privateai.camera.security.ScheduleKind
+import com.privateai.camera.ui.insights.SELF_PROFILE_ID
 import com.privateai.camera.ui.reminders.ReminderEditorState
 import com.privateai.camera.ui.reminders.ReminderLinker
 import com.privateai.camera.ui.reminders.RemindersEditor
@@ -72,10 +73,8 @@ fun MedicationsTab(
             repo = repo,
             onDismiss = { showAddDialog = false; editing = null },
             onSave = { med, reminderState ->
-                // 1. Persist medication so it has a stable id (needed for sourceId on the schedule)
                 val withProfile = med.copy(profileId = selectedProfileId)
                 repo.saveMedication(withProfile)
-                // 2. Apply reminder lifecycle (create / update / delete) and capture the linked scheduleId
                 val newScheduleId = ReminderLinker.apply(
                     context = context,
                     repo = repo,
@@ -86,7 +85,6 @@ fun MedicationsTab(
                     priorScheduleId = withProfile.scheduleId,
                     state = reminderState
                 )
-                // 3. If the linkage changed (created or removed), re-persist the medication
                 if (newScheduleId != withProfile.scheduleId) {
                     repo.saveMedication(withProfile.copy(scheduleId = newScheduleId))
                 }
@@ -133,7 +131,6 @@ fun MedicationsTab(
                         dateFmt = dateFmt,
                         onEdit = { editing = med; showAddDialog = true },
                         onDelete = {
-                            // Cascade: cancel + delete any linked reminder so we don't leave orphan alarms
                             med.scheduleId?.let { sid ->
                                 repo.loadScheduleItem(sid)?.let { item ->
                                     com.privateai.camera.service.ReminderScheduler.cancelItem(context, item.id, item.timesOfDay)
@@ -145,7 +142,7 @@ fun MedicationsTab(
                         }
                     )
                 }
-                item { Spacer(Modifier.height(80.dp)) } // space for FAB
+                item { Spacer(Modifier.height(80.dp)) }
             }
         }
 
@@ -223,7 +220,6 @@ private fun MedicationDialog(
     var dosage by remember { mutableStateOf(initial?.dosage ?: "") }
     var instructions by remember { mutableStateOf(initial?.instructions ?: "") }
     var notes by remember { mutableStateOf(initial?.notes ?: "") }
-    // Hydrate reminder state from the previously linked schedule (if any). Defaults to disabled.
     var reminderState by remember(initial?.id) {
         mutableStateOf(ReminderLinker.loadInitialState(repo, initial?.scheduleId))
     }
@@ -260,8 +256,6 @@ private fun MedicationDialog(
                     minLines = 2, maxLines = 4
                 )
 
-                // Inline reminder editor — when enabled, a linked ScheduleItem is created on save
-                // with kind=MEDICATION and sourceId=this medication's id.
                 Spacer(Modifier.height(8.dp))
                 RemindersEditor(
                     state = reminderState,

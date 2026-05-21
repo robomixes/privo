@@ -46,7 +46,21 @@ private val DAILY_TIPS: List<Int> = listOf(
     R.string.tip_advanced_settings_pin,
     R.string.tip_backup_downloads,
     R.string.tip_qr_generator,
-    R.string.tip_face_threshold_slider
+    R.string.tip_face_threshold_slider,
+    // AI Assistant tips — surface the chat surface, action proposals, and the
+    // sparkle menus that exist inside notes and translate. Most users don't
+    // discover these without a nudge.
+    R.string.tip_ai_chat_open,
+    R.string.tip_ai_chat_summary,
+    R.string.tip_ai_chat_actions,
+    R.string.tip_ai_sparkle_anywhere,
+    R.string.tip_ai_translate_sentences,
+    R.string.tip_ai_calibrate,
+    R.string.tip_camera_pinch_zoom,
+    R.string.tip_widget_quick_note,
+    R.string.tip_voice_clean,
+    R.string.tip_wifi_transfer,
+    R.string.tip_play_all_voice
 )
 
 /**

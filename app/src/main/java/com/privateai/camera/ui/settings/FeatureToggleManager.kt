@@ -16,7 +16,7 @@ enum class HomeLayout { GRID, TABS }
  */
 object FeatureToggleManager {
 
-    private val DEFAULT_ORDER = listOf("camera", "detect", "scan", "qrscanner", "translate", "vault", "notes", "insights", "reminders", "passwords", "tools", "contacts")
+    private val DEFAULT_ORDER = listOf("camera", "detect", "scan", "qrscanner", "translate", "vault", "notes", "insights", "health", "reminders", "passwords", "totp", "tools", "contacts")
 
     fun isFeatureEnabled(context: Context, route: String): Boolean {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

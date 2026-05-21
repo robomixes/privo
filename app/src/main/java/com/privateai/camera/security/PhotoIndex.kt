@@ -139,9 +139,18 @@ class PhotoIndex(private val database: PrivoraDatabase) {
             classifier.classifyWithEmbedding(bitmap)
         } else emptyList<Pair<String, Float>>() to FloatArray(0)
 
-        // 3. Merge: detector labels first, then classifier
+        // 3a. Preserve any Gemma-generated tags (score >= 0.99) from a previous
+        //     run so re-indexing doesn't silently strip them. mergeAiTags writes
+        //     these at score 1.0; ONNX classifier scores top out around 0.85.
+        val existingGemmaTags = getLabelsWithScores(photoId).filter { it.second >= 0.99f }
+
+        // 3b. Merge: existing Gemma tags first, then YOLO detections, then
+        //     ImageNet classifier. Case-insensitive dedup throughout.
         val merged = mutableListOf<Pair<String, Float>>()
         val seen = mutableSetOf<String>()
+        for ((label, score) in existingGemmaTags) {
+            if (label.lowercase() !in seen) { seen.add(label.lowercase()); merged.add(label to score) }
+        }
         for (det in detections.distinctBy { it.className }) {
             val label = det.className.replaceFirstChar { it.uppercase() }
             if (label.lowercase() !in seen) { seen.add(label.lowercase()); merged.add(label to det.confidence) }
@@ -149,8 +158,9 @@ class PhotoIndex(private val database: PrivoraDatabase) {
         for ((label, score) in classifications) {
             if (label.lowercase() !in seen) { seen.add(label.lowercase()); merged.add(label to score) }
         }
-        val labels = merged.take(8).map { it.first }
-        val scores = merged.take(8).map { it.second }
+        // Cap a touch higher than the old 8 to leave room for both Gemma + ONNX.
+        val labels = merged.take(12).map { it.first }
+        val scores = merged.take(12).map { it.second }
 
         // 4. Blur score
         val blurScore = if (!bitmap.isRecycled) blurDetector.getBlurScore(bitmap) else -1.0
@@ -187,18 +197,23 @@ class PhotoIndex(private val database: PrivoraDatabase) {
             }
         }
 
-        // 6. Store in database
+        // 6. Store in database.
+        //    Use ensureRow + UPDATE instead of INSERT OR REPLACE so the
+        //    `description` column (set by Gemma describePhoto) is preserved
+        //    across re-indexing. CONFLICT_REPLACE would delete the existing
+        //    row and the new ContentValues doesn't carry `description`, so
+        //    every re-index would silently wipe Gemma descriptions.
         db.beginTransaction()
         try {
+            ensureRow(photoId)
             val cv = ContentValues().apply {
-                put("photo_id", photoId)
                 put("labels", JSONArray(labels).toString())
                 put("scores", JSONArray(scores.map { it.toDouble() }).toString())
                 put("feature_vector", featureVector?.toBlob())
                 put("blur_score", blurScore)
                 put("indexed_at", System.currentTimeMillis())
             }
-            db.insertWithOnConflict("photo_index", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            db.update("photo_index", cv, "photo_id = ?", arrayOf(photoId))
 
             // Delete old face entries for this photo then insert new ones
             db.delete("face_entries", "photo_id = ?", arrayOf(photoId))
@@ -319,9 +334,20 @@ class PhotoIndex(private val database: PrivoraDatabase) {
 
                     var totalScore = 0f
                     for ((labelIndex, label) in labelsList.withIndex()) {
-                        val labelLower = label.lowercase().replace(" ", "_")
+                        // Tokenize the label on underscore / hyphen / space
+                        // and match per-token instead of substring. The old
+                        // .contains() check pulled in "card" / "scarecrow"
+                        // when the user searched for "car"; matching against
+                        // tokens fixes the bleed-through while still letting
+                        // multi-word labels ("sports_car") match a single
+                        // word query.
+                        val labelLower = label.lowercase()
+                        val tokens = labelLower.split('_', '-', ' ').filter { it.isNotBlank() }
                         for (w in expandedWords) {
-                            if (labelLower.contains(w) || w.contains(labelLower)) {
+                            val hit = tokens.any { it == w } ||
+                                tokens.any { it.startsWith(w) && it.length - w.length <= 1 } ||  // singular/plural slack
+                                labelLower == w
+                            if (hit) {
                                 totalScore += if (labelIndex < scoresList.size) scoresList[labelIndex] else 0.1f
                             }
                         }
@@ -546,12 +572,268 @@ class PhotoIndex(private val database: PrivoraDatabase) {
         return ""
     }
 
+    /**
+     * Ensure a photo_index row exists for [photoId] so subsequent UPDATEs land.
+     * Without this, photos that were never auto-indexed (older imports, vault
+     * items added before indexing ran) silently swallow writes from
+     * [setDescription] and [mergeAiTags].
+     */
+    private fun ensureRow(photoId: String) {
+        db.execSQL(
+            "INSERT OR IGNORE INTO photo_index (photo_id, labels, scores, indexed_at) VALUES (?, ?, ?, ?)",
+            arrayOf<Any>(photoId, "[]", "[]", System.currentTimeMillis())
+        )
+    }
+
+    /**
+     * Merge AI-generated tags into the existing labels for a photo.
+     *
+     * Tags coming from Gemma vision are scored 1.0 (max) so they sort above the
+     * ONNX classifier labels, which typically land in the 0.60-0.85 band. New
+     * tags that case-insensitively match an existing label are dropped — we never
+     * downgrade an existing high-confidence label, and we don't duplicate.
+     *
+     * The merged list is capped at 12 entries to keep the chip row from blowing
+     * up on busy photos.
+     */
+    fun mergeAiTags(photoId: String, newTags: List<String>) {
+        if (newTags.isEmpty()) {
+            Log.d(TAG, "mergeAiTags: newTags empty, skipping")
+            return
+        }
+        ensureRow(photoId)
+        val existing = getLabelsWithScores(photoId).toMutableList()
+        // Build a lookup so we can BUMP existing entries (not just skip) when
+        // Gemma's reply overlaps with ONNX classifier labels. Previously we
+        // dropped overlapping tags silently — which meant a photo whose tags
+        // Gemma already agreed with (e.g. ONNX "Person" + Gemma "person") was
+        // never marked as Gemma-processed (no score >= 0.99 entry was added),
+        // so countPending kept reporting it as "missing Gemma tags" and the
+        // bulk pass kept re-selecting the same photos. Bumping to 1.0
+        // guarantees a Gemma marker exists even when the set fully overlaps.
+        val byLower = HashMap<String, Int>()
+        existing.forEachIndexed { idx, pair -> byLower[pair.first.lowercase()] = idx }
+        for (raw in newTags) {
+            val tag = raw.trim().trim(',', '.', ';', ':')
+            if (tag.isBlank()) continue
+            val lower = tag.lowercase()
+            val existingIdx = byLower[lower]
+            if (existingIdx != null) {
+                if (existing[existingIdx].second < 1.0f) {
+                    existing[existingIdx] = existing[existingIdx].first to 1.0f
+                }
+            } else {
+                existing.add(tag to 1.0f)
+                byLower[lower] = existing.size - 1
+            }
+        }
+        val capped = existing.take(12)
+        val labelsJson = JSONArray(capped.map { it.first }).toString()
+        val scoresJson = JSONArray(capped.map { it.second.toDouble() }).toString()
+        val cv = ContentValues().apply {
+            put("labels", labelsJson)
+            put("scores", scoresJson)
+        }
+        val rows = db.update("photo_index", cv, "photo_id = ?", arrayOf(photoId))
+        Log.d(TAG, "mergeAiTags: photo=$photoId newTagCount=${newTags.size} stored=${capped.size} rowsUpdated=$rows labels=$labelsJson")
+    }
+
+    /**
+     * Stamp the photo's update time = NOW. Called from VaultRepository on
+     * replacePhoto so the sort modes UPDATED_DESC / UPDATED_ASC can find
+     * recently-edited photos without scanning every file's mtime.
+     */
+    fun markUpdated(photoId: String, atMillis: Long = System.currentTimeMillis()) {
+        ensureRow(photoId)
+        val cv = android.content.ContentValues().apply { put("updated_at", atMillis) }
+        db.update("photo_index", cv, "photo_id = ?", arrayOf(photoId))
+    }
+
+    /**
+     * Batch lookup: photo id → last updated_at millis (0 if never edited).
+     * Used by the gallery sort path so we don't fire a query per photo.
+     */
+    fun getUpdatedTimes(photoIds: Collection<String>): Map<String, Long> {
+        if (photoIds.isEmpty()) return emptyMap()
+        val result = HashMap<String, Long>(photoIds.size)
+        // SQLite has a default 999-parameter cap. Chunk to stay safely below.
+        photoIds.chunked(500).forEach { chunk ->
+            val placeholders = chunk.joinToString(",") { "?" }
+            db.rawQuery(
+                "SELECT photo_id, updated_at FROM photo_index WHERE photo_id IN ($placeholders)",
+                chunk.toTypedArray()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val id = cursor.getString(0)
+                    val t = cursor.getLong(1)
+                    if (t > 0L) result[id] = t
+                }
+            }
+        }
+        return result
+    }
+
     /** Set/update the AI-generated description for a photo. */
     fun setDescription(photoId: String, description: String) {
+        ensureRow(photoId)
         val cv = android.content.ContentValues().apply {
             put("description", description)
         }
         db.update("photo_index", cv, "photo_id = ?", arrayOf(photoId))
+    }
+
+    /**
+     * Result of a person-aware search: the matched photo IDs plus what the
+     * tokenizer detected so the caller can render UI affordances (e.g. a
+     * removable "Person: Anas ×" chip in the Vault search bar).
+     */
+    data class PersonAwareSearchResult(
+        val photoIds: List<String>,
+        val detectedPerson: String?,  // display name that matched (or null)
+        val residualQuery: String     // remaining tokens after person stripped
+    )
+
+    /**
+     * Compound search that recognizes a person's name embedded in free-text.
+     *
+     * "anas dogs" → finds photos that BOTH contain Anas's face AND match the
+     * "dogs" label/description search. "anas" alone → all photos with Anas.
+     * "dogs" alone → falls back to plain [searchByLabel].
+     *
+     * Person detection is greedy: tries 3-token → 2-token → 1-token spans
+     * looking for a face-identity name (loadFaceIdentitiesList) or a contact
+     * name ([ContactRepository.listContacts]) that matches case-insensitively.
+     * First match wins.
+     *
+     * Cost: face clustering via [getFaceGroups] is O(m²) on total faces;
+     * runs once per call (no cross-call cache yet). On ~5k photos with ~1k
+     * faces this is sub-second on Pixel 9a. searchByLabel is a LIKE scan
+     * over `photo_index.labels` JSON.
+     */
+    fun searchByPersonAndTags(
+        contactRepo: ContactRepository,
+        rawText: String,
+        limit: Int = 100
+    ): PersonAwareSearchResult {
+        val text = rawText.trim()
+        if (text.isEmpty()) return PersonAwareSearchResult(emptyList(), null, "")
+
+        val tokens = text.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return PersonAwareSearchResult(emptyList(), null, "")
+
+        // Build a (name → identityId) lookup over face-identity names + contact
+        // names. Contact names also map via personId → identity, so renaming a
+        // face group doesn't break "Anas" search if the contact name is intact.
+        val identities = loadFaceIdentitiesList()
+        val contacts = contactRepo.listContacts()
+
+        val nameToIdentity = HashMap<String, String>() // lowercase name → identity.id
+        for (id in identities) {
+            if (id.name.isNotBlank()) nameToIdentity[id.name.lowercase()] = id.id
+        }
+        for (c in contacts) {
+            if (c.name.isBlank()) continue
+            val matchedIdentity = identities.firstOrNull { it.personId == c.id }
+            if (matchedIdentity != null) {
+                nameToIdentity.putIfAbsent(c.name.lowercase(), matchedIdentity.id)
+            }
+        }
+
+        // Greedy span match: try 3-token, then 2-token, then 1-token windows
+        // at every position. First hit wins. Multi-word names like "john
+        // smith" only match if the user typed them in that order.
+        var matchedIdentityId: String? = null
+        var matchedName: String? = null
+        var matchStart = -1
+        var matchEnd = -1
+        outer@ for (span in 3 downTo 1) {
+            for (start in 0..tokens.size - span) {
+                val candidate = tokens.subList(start, start + span).joinToString(" ").lowercase()
+                val id = nameToIdentity[candidate]
+                if (id != null) {
+                    matchedIdentityId = id
+                    matchedName = identities.firstOrNull { it.id == id }?.name?.ifBlank {
+                        contacts.firstOrNull { it.id == identities.first { ii -> ii.id == id }.personId }?.name
+                    } ?: candidate.replaceFirstChar { it.uppercase() }
+                    matchStart = start
+                    matchEnd = start + span
+                    break@outer
+                }
+            }
+        }
+
+        val residualTokens = if (matchedIdentityId != null) {
+            tokens.subList(0, matchStart) + tokens.subList(matchEnd, tokens.size)
+        } else {
+            tokens
+        }
+        val residual = residualTokens.joinToString(" ")
+
+        // Per-token search with a cheap plural→singular fallback so "cars"
+        // matches the same labels as "car" (the ImageNet vocabulary stores
+        // singulars, and the alias-expansion map keys are singular). Only
+        // kicks in when the typed form returns nothing, to avoid polluting
+        // genuinely-distinct plural queries.
+        fun searchForToken(tok: String): List<String> {
+            val primary = searchByLabel(tok)
+            if (primary.isNotEmpty()) return primary
+            if (tok.length > 3 && tok.endsWith("s") && !tok.endsWith("ss")) {
+                return searchByLabel(tok.dropLast(1))
+            }
+            return primary
+        }
+
+        // Photos that match ALL residual tokens (per-token AND).
+        // Single-token residual is just the per-token search.
+        // Multi-token residual ("girl car") intersects per-token results so
+        // we don't return photos that match only one of the words.
+        fun multiTokenAnd(): List<String> {
+            if (residualTokens.isEmpty()) return emptyList()
+            if (residualTokens.size == 1) return searchForToken(residualTokens[0])
+            val perTokenRanked = residualTokens.map { tok -> searchForToken(tok) }
+            // Intersect: keep ranked order of the FIRST token's hits, filter
+            // by remaining token sets. This preserves searchByLabel's scoring
+            // (face-group hits at 2.0, description hits at 1.8, label sum) for
+            // the most-specific token while still requiring every word to hit.
+            val intersection = perTokenRanked.drop(1)
+                .map { it.toSet() }
+                .fold(perTokenRanked[0]) { acc, set -> acc.filter { it in set } }
+            return intersection
+        }
+
+        // No person → AND across residual tokens (or single-token plain search).
+        if (matchedIdentityId == null) {
+            return PersonAwareSearchResult(
+                photoIds = multiTokenAnd().take(limit),
+                detectedPerson = null,
+                residualQuery = text
+            )
+        }
+
+        // Person matched. Collect photo IDs containing that identity.
+        val faceGroups = getFaceGroups()
+        val personPhotoIds = faceGroups[matchedIdentityId]
+            ?.map { it.first }
+            ?.distinct()
+            ?: emptyList()
+
+        if (residual.isBlank()) {
+            return PersonAwareSearchResult(
+                photoIds = personPhotoIds.take(limit),
+                detectedPerson = matchedName,
+                residualQuery = ""
+            )
+        }
+
+        // Compound: per-token AND filtered to the person's photo set.
+        val personSet = personPhotoIds.toSet()
+        val intersected = multiTokenAnd().filter { it in personSet }
+
+        return PersonAwareSearchResult(
+            photoIds = intersected.take(limit),
+            detectedPerson = matchedName,
+            residualQuery = residual
+        )
     }
 
     /** Search photos by description text (in addition to labels). */
@@ -850,6 +1132,30 @@ class PhotoIndex(private val database: PrivoraDatabase) {
             put("name", name)
         }
         db.update("face_identities", cv, "id = ?", arrayOf(identityId))
+    }
+
+    /**
+     * Soft-reset face groups: wipe identities + exclusions + "not this
+     * person" flags but KEEP the per-face embeddings (`face_entries`) and
+     * AI tags (`photo_index.labels` / `description`). The next call to
+     * [getFaceGroups] re-clusters from the surviving embeddings — no model
+     * inference needed, no re-index pass.
+     *
+     * Useful after a detector backend swap (ML Kit → ONNX YuNet, Track A1.2),
+     * after the user tweaks the clustering threshold, or to recover from a
+     * messy chain of merges/renames. Cheap: three DELETEs in a single
+     * transaction.
+     */
+    fun clearFaceGroups() {
+        db.beginTransaction()
+        try {
+            db.delete("face_identities", null, null)
+            db.delete("face_exclusions", null, null)
+            db.delete("face_unlinked", null, null)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     /** Link a face group to a person (contact). Survives group renames. */

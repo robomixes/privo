@@ -8,6 +8,74 @@ Privora is licensed under [AGPL-3.0-or-later](LICENSE).
 
 ---
 
+## [2.1.0] — 2026-05-21
+
+The 2.1.0 release closes out the ML Kit removal program (F-Droid main now
+eligible for the `fdroid` flavor) and simplifies the on-device AI UX so
+the app is clear-cut whether AI is on or off.
+
+### Added
+- **Single source of truth for AI state** — `AiStatus` enum + reactive
+  Compose helper (`OFF` / `DOWNLOADING` / `READY` / `FAILED`). Every
+  AI-conditional UI in the app now follows the same rule: render only
+  when READY, otherwise hide entirely.
+- **Unified Settings → AI section.** All Gemma controls live in one
+  collapsible top-level section: main toggle, sub-toggles, "Process all
+  photos with AI", "Delete AI model". No more PIN gate on the AI toggle.
+- **Wizard step 5 on/off Switch** — when the AI model is already on
+  disk, the wizard exposes an explicit enable/disable Switch instead of
+  just showing "✓ Already downloaded" with no follow-up control.
+- **Wizard step 6 finish hint** — a one-liner when AI is off, so a user
+  who skipped doesn't reach the end thinking they're missing core
+  functionality.
+- **QR scanner authenticator mode** — when entered from Authenticator →
+  Scan QR, ZXing is narrowed to QR_CODE only and non-otpauth results
+  are silently dropped. Fixes 1-D barcode false positives hijacking
+  the otpauth flow.
+- **Assistant thumbnail viewer** — swipeable `HorizontalPager`.
+  Search-result thumbs async-load full-res from the encrypted vault
+  (thumb shown as fallback while loading). Page indicator `N / total`
+  when multiple thumbs.
+
+### Changed
+- **F-Droid `fdroid` flavor now ships with zero ML Kit / Google Play
+  Services dependencies.** Verified via `unzip -l fdroid.apk | grep -i
+  mlkit` → empty.
+- ML Kit Barcode → ZXing (Track A1.1)
+- ML Kit Face Detection → ONNX YuNet 2023mar (Track A1.2)
+- ML Kit OCR → Tesseract 5 with per-language download UI (Track A1.3)
+- ML Kit Document Scanner → CameraX + manual corner-drag scanner
+  (Track A2)
+- ML Kit Translate → flavor-gated: `playstore` keeps ML Kit Translate,
+  `fdroid` uses Gemma-only translation (Track A3)
+- Settings layout: removed three duplicate AI toggles from Essentials;
+  renamed "AI Detection" → "Object Detection" (only the always-on ONNX
+  classifier knobs remain there); main AI Assistant toggle moved out of
+  PIN-gated Advanced into the new AI section.
+- Brand copy softened — `settings_privo_desc` "AI camera that never
+  sends your data anywhere" → "Private camera + encrypted vault.
+  Optional on-device AI." (across 6 locales).
+
+### Fixed
+- QR scanner back-press loop: dismissing the result sheet on a still-
+  visible code no longer bounces it straight back open. Same-value
+  cooldown + dismissal re-stamping.
+- Authenticator scan: defensive parse with a Toast on the Add screen
+  when a scanned otpauth URI fails to parse, so the form isn't left
+  silently blank.
+- Authenticator add: re-using "+" after a Save no longer pre-fills with
+  the previously scanned URI (nav-route arg was leaking through).
+- Tabs layout: ✨ Assistant icon now respects the "Allow Assistant
+  without unlocking vault" toggle (mirrors grid layout).
+- Settings → Privacy: removed the stale "Document Scanner and
+  Translation use ML Kit" note (Track A made it false).
+
+### Removed
+- Five ML Kit dependencies (`mlkit-barcode-scanning`,
+  `mlkit-face-detection`, `mlkit-text-recognition`,
+  `mlkit-document-scanner`, plus `mlkit-translate` confined to the
+  `playstore` flavor).
+
 ## [2.0.5] — 2026-05-02
 
 ### Fixed

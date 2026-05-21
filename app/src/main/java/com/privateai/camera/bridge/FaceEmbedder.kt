@@ -10,11 +10,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
 import android.util.Log
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.FaceDetection
-import com.google.mlkit.vision.face.FaceDetector
-import com.google.mlkit.vision.face.FaceDetectorOptions
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -25,13 +20,11 @@ class FaceEmbedder(context: Context) {
     private var ortSession: OrtSession? = null
     private val inputSize = 112  // ArcFace MobileFaceNet expects 112x112
 
-    // ML Kit detector with landmarks enabled for face alignment
-    private val detector: FaceDetector = FaceDetection.getClient(
-        FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-            .build()
-    )
+    // ONNX face detector (YuNet) — replaces the ML Kit FaceDetection client
+    // used in v2.0.x as part of Track A1.2 (ML Kit removal). YuNet returns
+    // 5 landmarks alongside each box; we still only consume bounding boxes
+    // here (alignment via landmarks remains TODO — see [alignFace] below).
+    private val detector = FaceDetectorHolder.get(context)
 
     companion object {
         private const val TAG = "FaceEmbedder"
@@ -61,8 +54,7 @@ class FaceEmbedder(context: Context) {
         if (bitmap.isRecycled) return emptyList()
 
         try {
-            val inputImage = InputImage.fromBitmap(bitmap, 0)
-            val faces = Tasks.await(detector.process(inputImage))
+            val faces = detector.detect(bitmap)
             if (faces.isEmpty()) return emptyList()
 
             val bw = bitmap.width
@@ -70,11 +62,10 @@ class FaceEmbedder(context: Context) {
             val results = mutableListOf<Pair<RectF, FloatArray>>()
 
             for (face in faces) {
-                val bounds = face.boundingBox
-                val left = bounds.left.coerceIn(0, bw - 1)
-                val top = bounds.top.coerceIn(0, bh - 1)
-                val right = bounds.right.coerceIn(left + 1, bw)
-                val bottom = bounds.bottom.coerceIn(top + 1, bh)
+                val left = face.left.coerceIn(0, bw - 1)
+                val top = face.top.coerceIn(0, bh - 1)
+                val right = face.right.coerceIn(left + 1, bw)
+                val bottom = face.bottom.coerceIn(top + 1, bh)
                 val width = right - left
                 val height = bottom - top
                 if (width <= 0 || height <= 0) continue
@@ -178,6 +169,8 @@ class FaceEmbedder(context: Context) {
     fun release() {
         ortSession?.close()
         ortSession = null
-        detector.close()
+        // Do NOT release the FaceDetector — it's a process-wide singleton
+        // shared with FaceBlur, CaptureScreen's live preview, and the
+        // contacts photo-crop path. Closing it here would break those.
     }
 }

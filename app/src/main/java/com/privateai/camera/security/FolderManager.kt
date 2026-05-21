@@ -175,10 +175,19 @@ class FolderManager(private val context: Context, private val crypto: CryptoMana
     fun countItems(folderId: String): Int {
         val dir = getFolderDir(folderId)
         val directCount = if (dir.exists()) {
+            // Mirror VaultRepository.listFolderItems's filter (the canonical
+            // "is a user-visible item" rule). Previously this only excluded
+            // .thumb.enc / .vid.thumb.enc, so every photo's .meta.enc EXIF
+            // sidecar was being counted as a second photo — folder count
+            // appeared doubled after any import with EXIF metadata. Now also
+            // excludes .meta.enc / .ocr.enc, and treats .vid.enc / .pdf.enc /
+            // .file.enc as their own item types (still counted, but only once).
             (dir.listFiles() ?: emptyArray()).count {
                 it.isFile && it.name.endsWith(".enc") &&
                     !it.name.endsWith(".thumb.enc") &&
                     !it.name.endsWith(".vid.thumb.enc") &&
+                    !it.name.endsWith(".meta.enc") &&
+                    !it.name.endsWith(".ocr.enc") &&
                     !it.name.startsWith("_tobedeleted_")
             }
         } else 0

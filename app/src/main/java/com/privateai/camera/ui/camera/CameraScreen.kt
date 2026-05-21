@@ -20,7 +20,13 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import android.speech.tts.TextToSpeech
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import java.util.Locale
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -38,6 +44,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ImageSearch
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
@@ -130,6 +137,11 @@ fun CameraScreen(onBack: (() -> Unit)? = null) {
 fun CameraPreviewWithDetection(onBack: (() -> Unit)? = null) {
     val context = LocalContext.current
     val captureScope = androidx.compose.runtime.rememberCoroutineScope()
+    // Single source of truth for the AI gating in this screen (Detect FAB +
+    // whole-scene Describe). When AI isn't READY the buttons don't render
+    // at all — see AiStatus.kt for the rule.
+    val aiStatus by com.privateai.camera.bridge.rememberAiStatus()
+    val aiReady = aiStatus.isReady
     var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
     var inferenceTimeMs by remember { mutableLongStateOf(0L) }
     var frameCount by remember { mutableLongStateOf(0L) }
@@ -155,6 +167,86 @@ fun CameraPreviewWithDetection(onBack: (() -> Unit)? = null) {
 
     // Retain latest frame for image search cropping
     var latestFrameBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    // Per-detection AI description (Gemma vision). Cleared when the user
+    // selects a different detection so the card doesn't show stale text.
+    var aiDescription by remember { mutableStateOf("") }
+    var aiDescLoading by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(selectedDetection) {
+        aiDescription = ""
+    }
+
+    // Whole-scene AI description (Gemma vision over the entire frozen frame).
+    // Cleared when the user unfreezes or picks a specific detection — the
+    // detection then has its own per-detection description path above.
+    var sceneDescription by remember { mutableStateOf("") }
+    var sceneDescLoading by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(isFrozen, selectedDetection) {
+        if (!isFrozen || selectedDetection != null) {
+            sceneDescription = ""
+            sceneDescLoading = false
+        }
+    }
+
+    // TTS engine for "read AI descriptions aloud" (D10). Inline DisposableEffect
+    // mirrors TranslateScreen.kt:130-243; if Vault/Notes ever adopt TTS we'll
+    // extract this to util/TtsManager.kt then. F-Droid posture: pure AOSP
+    // TextToSpeech, no Play Services / proprietary deps.
+    val ttsEngine = remember { mutableStateOf<TextToSpeech?>(null) }
+    var ttsUnavailableNoticeShown by remember { mutableStateOf(false) }
+    var ttsSpeaking by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        var engine: TextToSpeech? = null
+        engine = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                val locale = Locale.getDefault()
+                val langStatus = try { engine?.setLanguage(locale) ?: TextToSpeech.LANG_MISSING_DATA } catch (_: Exception) { TextToSpeech.LANG_MISSING_DATA }
+                if (langStatus >= TextToSpeech.LANG_AVAILABLE) {
+                    ttsEngine.value = engine
+                    // Track speaking state so the UI can show a stop control
+                    // while audio is playing. Listener fires on a TTS-engine
+                    // thread; hop to main for Compose state mutation.
+                    val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+                    engine?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) { mainHandler.post { ttsSpeaking = true } }
+                        override fun onDone(utteranceId: String?) { mainHandler.post { ttsSpeaking = false } }
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) { mainHandler.post { ttsSpeaking = false } }
+                        override fun onError(utteranceId: String?, errorCode: Int) { mainHandler.post { ttsSpeaking = false } }
+                    })
+                }
+                // If language isn't available we leave ttsEngine null —
+                // speakText becomes a no-op; the one-time Toast surfaces on
+                // first attempted read so the user knows to install a voice.
+            }
+        }
+        onDispose { engine?.shutdown() }
+    }
+
+    fun speakAiText(text: String) {
+        if (text.isBlank()) return
+        val engine = ttsEngine.value
+        if (engine == null) {
+            if (!ttsUnavailableNoticeShown) {
+                ttsUnavailableNoticeShown = true
+                android.widget.Toast.makeText(
+                    context,
+                    context.getString(R.string.detect_tts_unavailable),
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+            return
+        }
+        engine.language = Locale.getDefault()
+        engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "detect-ai")
+    }
+
+    fun stopSpeaking() {
+        ttsEngine.value?.stop()
+        ttsSpeaking = false
+    }
+
+    val ttsAutoEnabled = com.privateai.camera.ui.settings.isDetectTtsEnabled(context)
 
     // Initialize detector
     val detector = remember { OnnxDetector(context) }
@@ -220,20 +312,34 @@ fun CameraPreviewWithDetection(onBack: (() -> Unit)? = null) {
             }
         )
 
-        // Frozen frame with blur + clear selected region
+        // Frozen frame with blur + clear selected region.
+        // Whole-scene describe (D3b) freezes without a selection — we still
+        // need to cover the live CameraPreview, so the frozen Image is drawn
+        // whenever `isFrozen` is true. The blurred / cropped selection visuals
+        // only apply when a detection has been chosen.
         val frozen = frozenBitmap
         val det = selectedDetection
-        if (isFrozen && frozen != null && det != null) {
+        if (isFrozen && frozen != null) {
 
-            // Blurred frozen frame covers the live preview
+            // Frozen frame covers the live preview. Blurred when a detection
+            // is selected (to highlight the crop); sharp when no selection
+            // (scene-describe shows the user the same frame Gemma is seeing).
             Image(
                 bitmap = frozen.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .blur(20.dp)
+                modifier = if (det != null) {
+                    Modifier.fillMaxSize().blur(20.dp)
+                } else {
+                    Modifier.fillMaxSize()
+                }
             )
+        }
+
+        // Selected-detection focus visuals (blur dim + clear cropped image)
+        // only when we actually have a selection.
+        if (isFrozen && frozen != null && det != null) {
+
             // Dark overlay on top of blur
             Box(
                 modifier = Modifier
@@ -279,9 +385,13 @@ fun CameraPreviewWithDetection(onBack: (() -> Unit)? = null) {
             }
         }
 
-        // Detection overlay — only show selected detection when frozen
+        // Detection overlay — when frozen, only show the selected detection
+        // (if any). With scene-describe the user freezes the frame without
+        // any selection — in that case we want NO boxes at all so the
+        // analyzer's continuing detection updates don't render over the
+        // frozen image.
         DetectionOverlay(
-            detections = if (isFrozen && selectedDetection != null) {
+            detections = if (isFrozen) {
                 listOfNotNull(selectedDetection)
             } else {
                 detections
@@ -316,6 +426,84 @@ fun CameraPreviewWithDetection(onBack: (() -> Unit)? = null) {
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        // Floating "Describe with AI" button anchored to the top-right corner
+        // of the selected box. Rendered AFTER DetectionOverlay so it sits on
+        // top of it in z-order — otherwise the overlay's tap-detection would
+        // intercept the click and treat it as a background tap (which clears
+        // the selection and unfreezes).
+        if (isFrozen) {
+            selectedDetection?.let { det ->
+                if (aiReady) {
+                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                        val sw = maxWidth
+                        val sh = maxHeight
+                        val padX = (det.x2 - det.x1) * 0.15f
+                        val padY = (det.y2 - det.y1) * 0.15f
+                        val ex2 = (det.x2 + padX).coerceAtMost(1f)
+                        val ey1 = (det.y1 - padY).coerceAtLeast(0f)
+                        val btnSize = 40.dp
+                        Box(
+                            modifier = Modifier
+                                .offset(
+                                    x = sw * ex2 - btnSize - 4.dp,
+                                    y = sh * ey1 + 4.dp
+                                )
+                                .size(btnSize)
+                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                                .clickable(enabled = !aiDescLoading) {
+                                    val frame = latestFrameBitmap ?: return@clickable
+                                    aiDescLoading = true
+                                    captureScope.launch {
+                                        try {
+                                            val crop = cropDetectionRegion(frame, det)
+                                            val tempFile = java.io.File(context.cacheDir, "detect_${det.classId}_${System.currentTimeMillis()}.jpg")
+                                            withContext(Dispatchers.IO) {
+                                                java.io.FileOutputStream(tempFile).use { out ->
+                                                    crop.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                                                }
+                                            }
+                                            crop.recycle()
+                                            val prompt = com.privateai.camera.bridge.GemmaPrompts.describeDetection(det.className)
+                                            val desc = com.privateai.camera.bridge.GemmaRunner.describeImage(
+                                                context, tempFile.absolutePath, prompt
+                                            )
+                                            tempFile.delete()
+                                            aiDescription = desc?.trim().orEmpty()
+                                            if (ttsAutoEnabled && aiDescription.isNotEmpty()) {
+                                                speakAiText(aiDescription)
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("DetectAI", "Describe failed: ${e.message}", e)
+                                        }
+                                        aiDescLoading = false
+                                    }
+                                }
+                                .semantics {
+                                    contentDescription = context.getString(R.string.detect_describe_with_ai)
+                                    role = Role.Button
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (aiDescLoading) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color.White
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Focus ring animation
         focusPoint?.let { point ->
@@ -441,6 +629,52 @@ fun CameraPreviewWithDetection(onBack: (() -> Unit)? = null) {
                             Icon(Icons.Default.ImageSearch, contentDescription = null, modifier = Modifier.size(18.dp))
                             Text(stringResource(R.string.search_by_image), modifier = Modifier.padding(start = 4.dp))
                         }
+
+                        // Describe-with-AI lives as a floating icon on the
+                        // selected box itself (anchored to its top-right corner)
+                        // — closer to where the user's finger already is than
+                        // a button buried in this bottom card.
+                    }
+
+                    // AI description result (under the action buttons) with
+                    // a manual replay speaker icon (D10). Speaker shown
+                    // regardless of the auto-TTS Settings toggle so users can
+                    // always re-hear; tap is silent no-op if TTS isn't
+                    // available on the device (Toast surfaces the reason once).
+                    if (aiDescription.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp)
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant,
+                                    androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                                )
+                                .padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = aiDescription,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = {
+                                    if (ttsSpeaking) stopSpeaking() else speakAiText(aiDescription)
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    if (ttsSpeaking) Icons.AutoMirrored.Filled.VolumeOff
+                                    else Icons.AutoMirrored.Filled.VolumeUp,
+                                    contentDescription = stringResource(
+                                        if (ttsSpeaking) R.string.detect_stop_speech
+                                        else R.string.detect_replay_speech
+                                    ),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -508,13 +742,150 @@ fun CameraPreviewWithDetection(onBack: (() -> Unit)? = null) {
             }
         }
 
-        // Bottom chips (only when no detection is selected)
-        if (detections.isNotEmpty() && selectedDetection == null) {
+        // Floating "Describe scene" button at BottomStart (mirrors capture
+        // FAB on the right). Only shown when live (not frozen) and Gemma is
+        // available. Tap → freezes the current frame, runs Gemma vision over
+        // the whole image, surfaces the result in a card at BottomCenter.
+        if (!isFrozen && aiReady) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(bottom = 32.dp, start = 16.dp)
+                    .size(56.dp)
+                    .semantics {
+                        contentDescription = context.getString(R.string.detect_describe_scene)
+                        role = Role.Button
+                    }
+                    .background(Color.Black.copy(alpha = 0.7f), CircleShape)
+                    .border(3.dp, Color.White.copy(alpha = 0.7f), CircleShape)
+                    .clickable(enabled = !sceneDescLoading) {
+                        val frame = latestFrameBitmap?.copy(Bitmap.Config.ARGB_8888, false) ?: return@clickable
+                        // Freeze the live preview so the user sees what's being described.
+                        frozenBitmap?.recycle()
+                        frozenBitmap = frame.copy(Bitmap.Config.ARGB_8888, false)
+                        isFrozen = true
+                        sceneDescLoading = true
+                        sceneDescription = ""
+                        captureScope.launch {
+                            try {
+                                val tempFile = java.io.File(context.cacheDir, "scene_${System.currentTimeMillis()}.jpg")
+                                withContext(Dispatchers.IO) {
+                                    java.io.FileOutputStream(tempFile).use { out ->
+                                        frame.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                                    }
+                                }
+                                frame.recycle()
+                                val desc = com.privateai.camera.bridge.GemmaRunner.describeImage(
+                                    context, tempFile.absolutePath,
+                                    com.privateai.camera.bridge.GemmaPrompts.describePhoto()
+                                )
+                                tempFile.delete()
+                                sceneDescription = desc?.trim().orEmpty()
+                                if (ttsAutoEnabled && sceneDescription.isNotEmpty()) {
+                                    speakAiText(sceneDescription)
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.e("DetectAI", "Scene describe failed: ${e.message}", e)
+                            }
+                            sceneDescLoading = false
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                if (sceneDescLoading) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            }
+        }
+
+        // Scene description result card — shown when Gemma returned a
+        // whole-frame description and there's no selected detection (the
+        // per-detection card takes over in that case).
+        if (sceneDescription.isNotEmpty() && selectedDetection == null) {
+            Card(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 100.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
+                )
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            stringResource(R.string.detect_describe_scene),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        // Manual replay / stop speaker (D10)
+                        IconButton(
+                            onClick = {
+                                if (ttsSpeaking) stopSpeaking() else speakAiText(sceneDescription)
+                            },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                if (ttsSpeaking) Icons.AutoMirrored.Filled.VolumeOff
+                                else Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = stringResource(
+                                    if (ttsSpeaking) R.string.detect_stop_speech
+                                    else R.string.detect_replay_speech
+                                ),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        sceneDescription,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+            }
+        }
+
+        // Scene-describe spinner overlay while Gemma is working with no
+        // result yet — centered for visibility while the frozen frame is up.
+        if (sceneDescLoading && selectedDetection == null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.6f), CircleShape)
+                    .size(72.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(36.dp),
+                    strokeWidth = 3.dp,
+                    color = Color.White
+                )
+            }
+        }
+
+        // Bottom chips (only when no detection is selected and live preview).
+        // Hidden when frozen so they don't compete with the scene-describe
+        // result card. Centered so they don't run under the FABs at the
+        // bottom-left (Describe scene) and bottom-right (capture).
+        if (!isFrozen && detections.isNotEmpty() && selectedDetection == null) {
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(bottom = 32.dp, start = 16.dp, end = 16.dp),
+                    .padding(bottom = 32.dp, start = 88.dp, end = 88.dp)
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 detections.take(3).forEach { detection ->

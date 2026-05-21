@@ -75,38 +75,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
-import com.google.mlkit.common.model.DownloadConditions
-import com.google.mlkit.nl.translate.TranslateLanguage
-import com.google.mlkit.nl.translate.Translation
-import com.google.mlkit.nl.translate.TranslatorOptions
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.privateai.camera.R
+import com.privateai.camera.bridge.LangItem
+import com.privateai.camera.bridge.Translator
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import java.io.File
 import java.util.Locale
 
-data class LangItem(val code: String, val name: String)
-
-val LANGUAGES = listOf(
-    LangItem(TranslateLanguage.ENGLISH, "English"),
-    LangItem(TranslateLanguage.ARABIC, "Arabic"),
-    LangItem(TranslateLanguage.FRENCH, "French"),
-    LangItem(TranslateLanguage.SPANISH, "Spanish"),
-    LangItem(TranslateLanguage.GERMAN, "German"),
-    LangItem(TranslateLanguage.CHINESE, "Chinese"),
-    LangItem(TranslateLanguage.JAPANESE, "Japanese"),
-    LangItem(TranslateLanguage.KOREAN, "Korean"),
-    LangItem(TranslateLanguage.PORTUGUESE, "Portuguese"),
-    LangItem(TranslateLanguage.RUSSIAN, "Russian"),
-    LangItem(TranslateLanguage.TURKISH, "Turkish"),
-    LangItem(TranslateLanguage.ITALIAN, "Italian"),
-    LangItem(TranslateLanguage.HINDI, "Hindi"),
-    LangItem(TranslateLanguage.DUTCH, "Dutch"),
-    LangItem(TranslateLanguage.POLISH, "Polish"),
-)
+// LANGUAGES and LangItem live in [com.privateai.camera.bridge.Translator].
+// Re-exported here so the rest of this file can keep its `LANGUAGES` /
+// `LangItem` references unchanged.
+private val LANGUAGES: List<LangItem> = Translator.LANGUAGES
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -207,26 +186,25 @@ fun TranslateScreen(onBack: (() -> Unit)? = null) {
             return
         }
 
-        // Text-only translation — always ML Kit (best for words + short phrases)
+        // Text-only translation. The Translator interface is implemented
+        // per build flavor (Track A3) — playstore wraps ML Kit, fdroid
+        // wraps Gemma. Both expose the same suspend translate() so this
+        // call doesn't change between flavors. Translator instances are
+        // cheap in playstore (one ML Kit client per language pair, cached
+        // and reused) and a no-op in fdroid (Gemma is a process-wide
+        // singleton).
         isTranslating = true
         translatedText = "" // clear old result + alternatives immediately
         statusMessage = "Translating..."
-        val options = TranslatorOptions.Builder()
-            .setSourceLanguage(sourceLang.code)
-            .setTargetLanguage(targetLang.code)
-            .build()
-        val translator = Translation.getClient(options)
         scope.launch {
+            val translator = Translator.create(context)
             try {
-                translator.downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
-                val result = kotlinx.coroutines.withTimeoutOrNull(8000L) {
-                    translator.translate(sourceText).await()
-                }
-                if (result != null) {
+                val result = translator.translate(sourceText, sourceLang, targetLang)
+                if (!result.isNullOrBlank()) {
                     translatedText = result
                     statusMessage = ""
                 } else {
-                    statusMessage = "Translation timed out — the word may not exist in this language."
+                    statusMessage = "Translation failed — the word may not exist in this language."
                 }
             } catch (e: Exception) {
                 statusMessage = "Translation failed: ${e.message}"
@@ -296,7 +274,8 @@ fun TranslateScreen(onBack: (() -> Unit)? = null) {
             )
 
             // AI grammar check — fix spelling/grammar before translating (only when AI active)
-            val aiAvailable = remember { com.privateai.camera.bridge.GemmaRunner.isAvailable(context) }
+            val aiStatusForGrammar by com.privateai.camera.bridge.rememberAiStatus()
+            val aiAvailable = aiStatusForGrammar.isReady
             var isFixingGrammar by remember { mutableStateOf(false) }
             if (aiAvailable && sourceText.isNotBlank()) {
                 Row(
@@ -545,59 +524,44 @@ private fun processImage(
                 }
             } catch (_: Exception) {}
 
-            // OCR
-            val image = InputImage.fromBitmap(originalBitmap, 0)
-            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-            val ocrResult = recognizer.process(image).await()
-
-            if (ocrResult.text.isBlank()) {
-                onError("No text found in image")
+            // OCR via Tesseract (Track A1.3 — replaces ML Kit text recognition).
+            // The previous ML Kit path exposed per-block bounding boxes which
+            // this screen used to draw a translation overlay on top of the
+            // original photo. Tesseract4Android does expose word-level
+            // boxes (TessBaseAPI.regions / words), but the multi-region
+            // overlay code below is not Track A1.3's scope — for now we
+            // translate the full document text and surface it via the
+            // existing onOcrDone / onSuccess callbacks. The bitmap returned
+            // is the original image (no overlay yet).
+            val ocrText = com.privateai.camera.bridge.TesseractRecognizer
+                .recognizeInstalledLanguages(context, originalBitmap)
+            if (ocrText.isBlank()) {
+                if (!com.privateai.camera.bridge.TesseractRecognizer.hasAnyLanguage(context)) {
+                    onError(context.getString(R.string.scanner_ocr_no_languages))
+                } else {
+                    onError("No text found in image")
+                }
                 originalBitmap.recycle()
                 return@launch
             }
+            onOcrDone(ocrText)
 
-            onOcrDone(ocrResult.text)
-
-            // Translate
-            val options = TranslatorOptions.Builder()
-                .setSourceLanguage(sourceLang.code)
-                .setTargetLanguage(targetLang.code)
-                .build()
-            val translator = Translation.getClient(options)
-            translator.downloadModelIfNeeded(DownloadConditions.Builder().build()).await()
-
-            // Translate each text block and overlay on image
+            // Translate via the flavor-specific Translator (Track A3).
+            // We translate paragraph-by-paragraph because per-paragraph
+            // calls keep the LLM's working context small in the fdroid
+            // path and the ML Kit path's per-call cost is dominated by
+            // model load (already paid on first call) regardless.
+            val translator = Translator.create(context)
             val resultBitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
-            val canvas = Canvas(resultBitmap)
             val fullTranslated = StringBuilder()
-
-            for (block in ocrResult.textBlocks) {
-                val translatedBlock = translator.translate(block.text).await()
-                fullTranslated.appendLine(translatedBlock)
-
-                val box = block.boundingBox ?: continue
-
-                // Draw white background over original text
-                val bgPaint = Paint().apply {
-                    color = AndroidColor.WHITE
-                    style = Paint.Style.FILL
-                    alpha = 220
+            try {
+                for (block in ocrText.split("\n\n").map { it.trim() }.filter { it.isNotEmpty() }) {
+                    val translatedBlock = translator.translate(block, sourceLang, targetLang)
+                    if (!translatedBlock.isNullOrBlank()) fullTranslated.appendLine(translatedBlock)
                 }
-                canvas.drawRect(box, bgPaint)
-
-                // Draw translated text
-                val textPaint = Paint().apply {
-                    color = AndroidColor.rgb(0, 100, 200)
-                    textSize = calculateTextSize(translatedBlock, box)
-                    isAntiAlias = true
-                    isFakeBoldText = true
-                }
-
-                // Wrap text within the box
-                drawTextInBox(canvas, translatedBlock, box, textPaint)
+            } finally {
+                translator.close()
             }
-
-            translator.close()
             onTranslated(fullTranslated.toString().trim(), resultBitmap)
 
         } catch (e: Exception) {

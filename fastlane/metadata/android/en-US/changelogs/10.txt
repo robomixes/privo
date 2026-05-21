@@ -1,0 +1,15 @@
+v2.1.0
+
+F-Droid eligibility
+• fdroid flavor now ships with zero ML Kit / Google Play Services deps
+• Barcode → ZXing, Face → ONNX YuNet, OCR → Tesseract 5, Doc Scanner → CameraX, Translate → Gemma (fdroid) / ML Kit (playstore)
+
+AI made optional and clear
+• One unified Settings → AI section (no more PIN gate)
+• AI buttons hide when off — no more disabled greys
+• Wizard now lets you toggle AI on/off if the model is already downloaded
+
+Fixes
+• QR scanner back-press loop
+• Authenticator scan reliability
+• Assistant: tap thumbnail → full-res + swipe

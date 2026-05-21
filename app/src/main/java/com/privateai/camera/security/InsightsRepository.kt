@@ -77,6 +77,35 @@ data class Medication(
     val notes: String = ""
 )
 
+/**
+ * One menstrual-cycle entry. Stored as `${id}.cycle.enc` in `vault/insights/`,
+ * encrypted with the same DEK as everything else. Multi-profile via `profileId`.
+ *
+ * Day-precision: `periodStart` and `periodEnd` are millis but the UI rounds
+ * them to local-day boundaries — there is no "11:42 AM" precision for periods.
+ *
+ * `flow` is 1 (light) – 5 (heaviest); `symptoms` is a list of canonical keys
+ * (`cramps`, `headache`, etc.) — never free text in v1, to keep translations tight.
+ */
+data class CycleEntry(
+    val id: String = UUID.randomUUID().toString(),
+    val profileId: String = "self",
+    val periodStart: Long,
+    val periodEnd: Long? = null,
+    val flow: Int? = null,
+    val symptoms: List<String> = emptyList(),
+    val notes: String? = null,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+/** Result of `predictNextPeriod`. `nextStart` is null when no entries exist. */
+data class CyclePrediction(
+    val nextStart: Long?,
+    val cycleLengthDays: Int,    // average gap between starts; defaults to 28 when 0 history
+    val periodLengthDays: Int,   // average duration; defaults to 5 when 0 history
+    val confidence: Int          // 0..3 — how many historical gaps drove the average
+)
+
 enum class ScheduleKind { MEDICATION, HABIT, CUSTOM }
 enum class LogState { DONE, SKIPPED, MISSED }
 
@@ -273,6 +302,81 @@ class InsightsRepository(private val baseDir: File, private val crypto: CryptoMa
 
     fun listHealthEntriesInRange(from: Long, to: Long, profileId: String = "self"): List<HealthEntry> =
         listHealthEntries().filter { it.profileId == profileId && it.date in from..to }
+
+    // ===== Cycle / Period =====
+
+    fun saveCycleEntry(entry: CycleEntry) {
+        val json = JSONObject().apply {
+            put("id", entry.id)
+            put("profileId", entry.profileId)
+            put("periodStart", entry.periodStart)
+            if (entry.periodEnd != null) put("periodEnd", entry.periodEnd)
+            if (entry.flow != null) put("flow", entry.flow)
+            put("symptoms", JSONArray(entry.symptoms))
+            if (entry.notes != null) put("notes", entry.notes)
+            put("createdAt", entry.createdAt)
+        }.toString()
+        crypto.encryptToFile(json.toByteArray(Charsets.UTF_8), File(healthDir, "${entry.id}.cycle.enc"))
+    }
+
+    fun listCycleEntries(): List<CycleEntry> {
+        return (healthDir.listFiles() ?: emptyArray())
+            .filter { it.name.endsWith(".cycle.enc") && !it.name.startsWith("_tobedeleted_") }
+            .mapNotNull { file ->
+                try {
+                    val obj = JSONObject(String(crypto.decryptFile(file), Charsets.UTF_8))
+                    val symptomsArr = obj.optJSONArray("symptoms")
+                    val symptoms = if (symptomsArr != null)
+                        (0 until symptomsArr.length()).map { symptomsArr.getString(it) }
+                    else emptyList()
+                    CycleEntry(
+                        id = obj.getString("id"),
+                        profileId = obj.optString("profileId", "self"),
+                        periodStart = obj.getLong("periodStart"),
+                        periodEnd = if (obj.has("periodEnd")) obj.getLong("periodEnd") else null,
+                        flow = if (obj.has("flow")) obj.getInt("flow") else null,
+                        symptoms = symptoms,
+                        notes = obj.optString("notes", "").ifEmpty { null },
+                        createdAt = obj.optLong("createdAt", 0L)
+                    )
+                } catch (e: Exception) { Log.e(TAG, "Failed to load cycle: ${e.message}"); null }
+            }
+            .sortedByDescending { it.periodStart }
+    }
+
+    fun deleteCycleEntry(id: String) {
+        File(healthDir, "$id.cycle.enc").delete()
+    }
+
+    /**
+     * Last-3-cycles average. Defaults to 28-day cycle / 5-day period when there's
+     * insufficient history. The `confidence` field exposes how many real data
+     * points went in (0..3) so the UI can label outputs as "estimate" honestly.
+     *
+     * Always retrospective: takes existing logged starts, computes gap averages,
+     * projects the next start forward. **Never** outputs ovulation, fertility
+     * window, or "safe day" — that's regulatory territory we explicitly avoid.
+     */
+    fun predictNextPeriod(entries: List<CycleEntry>): CyclePrediction {
+        if (entries.isEmpty()) return CyclePrediction(null, 28, 5, 0)
+        val sorted = entries.sortedBy { it.periodStart }.takeLast(4)
+        val dayMs = 24L * 60 * 60 * 1000
+        val gaps = sorted.zipWithNext { a, b ->
+            ((b.periodStart - a.periodStart) / dayMs).toInt()
+        }.filter { it in 14..60 }   // sanity range; ignore outliers
+        val avgCycle = if (gaps.isNotEmpty()) gaps.average().toInt() else 28
+        val durations = sorted.mapNotNull { e ->
+            if (e.periodEnd != null) ((e.periodEnd - e.periodStart) / dayMs).toInt().takeIf { it in 1..14 } else null
+        }
+        val avgPeriod = if (durations.isNotEmpty()) durations.average().toInt() else 5
+        val lastStart = sorted.last().periodStart
+        return CyclePrediction(
+            nextStart = lastStart + avgCycle * dayMs,
+            cycleLengthDays = avgCycle,
+            periodLengthDays = avgPeriod,
+            confidence = gaps.size.coerceAtMost(3)
+        )
+    }
 
     // ===== Health Profiles =====
 

@@ -71,7 +71,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
-import com.google.mlkit.vision.barcode.common.Barcode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -335,7 +334,7 @@ fun QrGenerateTab(
                     val item = QrHistoryItem(
                         rawValue = content,
                         displayValue = getDisplayValue(selectedType, content),
-                        format = Barcode.FORMAT_QR_CODE,
+                        format = BarcodeType.FORMAT_QR_CODE,
                         valueType = getValueType(selectedType),
                         typeLabel = selectedType.label,
                         source = QrSource.GENERATED
@@ -429,13 +428,13 @@ private fun getTypeIcon(type: QrGeneratorType): ImageVector {
 
 private fun getValueType(type: QrGeneratorType): Int {
     return when (type) {
-        QrGeneratorType.URL -> Barcode.TYPE_URL
-        QrGeneratorType.WIFI -> Barcode.TYPE_WIFI
-        QrGeneratorType.PHONE -> Barcode.TYPE_PHONE
-        QrGeneratorType.EMAIL -> Barcode.TYPE_EMAIL
-        QrGeneratorType.SMS -> Barcode.TYPE_SMS
-        QrGeneratorType.VCARD -> Barcode.TYPE_CONTACT_INFO
-        QrGeneratorType.PLAIN_TEXT -> Barcode.TYPE_TEXT
+        QrGeneratorType.URL -> BarcodeType.URL
+        QrGeneratorType.WIFI -> BarcodeType.WIFI
+        QrGeneratorType.PHONE -> BarcodeType.PHONE
+        QrGeneratorType.EMAIL -> BarcodeType.EMAIL
+        QrGeneratorType.SMS -> BarcodeType.SMS
+        QrGeneratorType.VCARD -> BarcodeType.CONTACT_INFO
+        QrGeneratorType.PLAIN_TEXT -> BarcodeType.TEXT
     }
 }
 

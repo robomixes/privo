@@ -49,11 +49,17 @@ androidx-work-runtime = { group = "androidx.work", name = "work-runtime-ktx", ve
 kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version = "1.9.0" }
 
 # ML Kit
-mlkit-document-scanner = { group = "com.google.android.gms", name = "play-services-mlkit-document-scanner", version = "16.0.0-beta1" }
-mlkit-text-recognition = { group = "com.google.mlkit", name = "text-recognition", version = "16.0.1" }
-mlkit-barcode-scanning = { group = "com.google.mlkit", name = "barcode-scanning", version = "17.3.0" }
 mlkit-translate = { group = "com.google.mlkit", name = "translate", version = "17.0.3" }
-mlkit-face-detection = { group = "com.google.mlkit", name = "face-detection", version = "16.1.7" }
+
+# Tesseract 5 (OCR — replaces ML Kit text-recognition, Track A1.3). The
+# tesseract4android library is the maintained Android wrapper around the
+# upstream Tesseract C++ engine. The `-openmp` variant uses OpenMP for
+# multi-threaded recognition (~2x faster on multi-core devices). Hosted
+# on JitPack only — Maven Central doesn't carry this artifact, so the
+# JitPack repo is added in settings.gradle.kts. The group uses `.` not
+# `:` between user/repo because we're pulling a subproject of the
+# multi-module Tesseract4Android Gradle build.
+tesseract4android = { group = "com.github.adaptech-cz.Tesseract4Android", name = "tesseract4android-openmp", version = "4.9.0" }
 
 # ZXing (QR code generation)
 zxing-core = { group = "com.google.zxing", name = "core", version = "3.5.3" }
@@ -62,7 +68,7 @@ zxing-core = { group = "com.google.zxing", name = "core", version = "3.5.3" }
 # Pinned to a specific version (was "+") for reproducible builds — required for
 # F-Droid and stops upstream regressions from silently breaking the next clean
 # build. Bumping this is a deliberate decision; test vision after every bump.
-litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version = "0.11.0-rc1" }
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version = "0.11.0" }
 
 # SQLCipher (encrypted SQLite)
 sqlcipher = { group = "net.zetetic", name = "sqlcipher-android", version = "4.6.1" }
@@ -70,6 +76,10 @@ sqlite-ktx = { group = "androidx.sqlite", name = "sqlite-ktx", version = "2.4.0"
 
 # Wi-Fi Transfer
 nanohttpd = { group = "org.nanohttpd", name = "nanohttpd", version = "2.3.1" }
+
+# PdfBox-Android — text-layer extraction from already-imported PDFs (Phase 2
+# of "Ask My Documents"). MIT licensed, AGPL-compatible. ~3 MB at runtime.
+pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version = "2.0.27.0" }
 
 # Testing
 junit = { group = "junit", name = "junit", version = "4.13.2" }

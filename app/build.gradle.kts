@@ -22,8 +22,8 @@ android {
         applicationId = "com.privateai.camera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "2.0.7"
+        versionCode = 10
+        versionName = "2.1.0"
     }
 
     signingConfigs {
@@ -152,14 +152,26 @@ dependencies {
     // ZXing (QR code generation)
     implementation(libs.zxing.core)
 
+    // PdfBox-Android — text-layer extraction from already-imported PDFs.
+    // Phase 2 of "Ask My Documents": lets the Assistant read PDFs that
+    // weren't scanned through Privora's scanner.
+    implementation(libs.pdfbox.android)
+
     // LiteRT-LM (Gemma 4 on-device LLM)
     implementation(libs.litertlm.android)
 
-    // ML Kit
-    implementation(libs.mlkit.document.scanner)
-    implementation(libs.mlkit.text.recognition)
-    implementation(libs.mlkit.barcode.scanning)
-    implementation(libs.mlkit.translate)
-    implementation(libs.mlkit.face.detection)
-    implementation(libs.kotlinx.coroutines.play.services)
+    // ML Kit (Track A complete after this flavor-gate). Translate is now
+    // playstoreImplementation only — the fdroid flavor uses a Gemma-based
+    // Translator instead (see app/src/fdroid/java/.../bridge/TranslatorImpl.kt).
+    // The fdroid APK has ZERO ML Kit packages — F-Droid main eligibility
+    // unblocked once this lands.
+    "playstoreImplementation"(libs.mlkit.translate)
+    "playstoreImplementation"(libs.kotlinx.coroutines.play.services)
+    // kotlinx-coroutines-play-services is needed for ML Kit's Task.await()
+    // helpers, so it follows mlkit-translate into the playstore-only set.
+
+    // Tesseract 5 (OCR) — Track A1.3 replacement for ML Kit
+    // text-recognition. Multi-language by design; tessdata files are
+    // downloaded lazily per language at runtime (TesseractDataManager).
+    implementation(libs.tesseract4android)
 }

@@ -74,6 +74,10 @@ class MainActivity : AppCompatActivity() {
         // One-time migration: move pre-2.0.2 model file from internal to
         // external app-private storage (DownloadManager can't write to internal).
         com.privateai.camera.bridge.GemmaRunner.migrateModelLocation(this)
+        // Auto-clear sticky AI crash flags when the app has been upgraded —
+        // a flag set on a broken old build shouldn't strand the user after the
+        // bug is fixed. See clearStaleCrashFlagsOnUpgrade() docs.
+        com.privateai.camera.bridge.GemmaRunner.clearStaleCrashFlagsOnUpgrade(this)
         // If a download was in flight when the app was last killed, resume polling.
         com.privateai.camera.bridge.GemmaModelManager.reconnect(this)
 

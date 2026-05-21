@@ -53,11 +53,35 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
     }
 
     data class BackupStats(
+        // Vault items
         val photoCount: Int,
         val videoCount: Int,
+        val pdfCount: Int,
+        val fileCount: Int,        // generic non-PDF files
+        val ocrSidecarCount: Int,  // docs queryable by the AI Assistant
+        val starredCount: Int,
+        val folderCount: Int,
+        val trashCount: Int,
+        // Module data
         val noteCount: Int,
+        val reminderCount: Int,
+        val expenseCount: Int,
+        val healthCount: Int,      // weight / sleep / mood / etc.
+        val medicationCount: Int,
+        val cycleCount: Int,
+        val habitCount: Int,
+        val contactCount: Int,
+        val totpCount: Int,
+        val passwordHintCount: Int,
+        // Whole-vault size on disk (sum of every .enc file under vault/)
         val totalSizeBytes: Long
-    )
+    ) {
+        /** Whether the user has anything worth backing up at all. */
+        val isEmpty: Boolean
+            get() = photoCount + videoCount + pdfCount + fileCount + noteCount +
+                reminderCount + expenseCount + healthCount + medicationCount +
+                cycleCount + habitCount + contactCount + totpCount + passwordHintCount == 0
+    }
 
     /** SharedPreferences to include in backup (user preferences, not security keys). */
     private val prefsToBackup = listOf(
@@ -66,30 +90,98 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
         "app_settings",         // language preference
         "privacy_settings",     // grace period, etc.
         "qr_history",           // QR scan/generate history
+        "totp_settings",        // Authenticator hide-until-tap / autolock toggles
+        "gemma_settings",       // AI assistant enabled flag (without this, restore
+                                // leaves model file in place but flag unset → Assistant
+                                // appears "off" with no obvious recovery path)
     )
     private val prefsDirInZip = "__prefs__/"
 
     /**
-     * Count items that would be included in a backup.
+     * Count items that would be included in a backup. Iterates every module's
+     * repository so the Backup screen's "Your data" summary stays honest as
+     * new modules are added — anything that lives under `vault/` or has a
+     * pref in [prefsToBackup] should also bump a count here.
+     *
+     * Failures per-module fall back to 0 so a single corrupt sidecar doesn't
+     * black-hole the whole summary screen.
      */
     fun getBackupStats(): BackupStats {
         val vault = VaultRepository(context, crypto)
         val noteRepo = NoteRepository(File(context.filesDir, "vault/notes"), crypto)
+        val insights = InsightsRepository(File(context.filesDir, "vault/insights"), crypto)
+        // ContactRepository needs the SQLCipher database (contacts live there).
+        val db = com.privateai.camera.security.PrivoraDatabase.getInstance(context, crypto)
+        val contacts = ContactRepository(File(context.filesDir, "vault/contacts"), crypto, db)
+        val totp = TotpRepository(context, crypto)
+        // PasswordHintRepository's baseDir is the vault root (it manages its
+        // own subdir within), per its other call sites.
+        val passwordHints = PasswordHintRepository(File(context.filesDir, "vault"), crypto)
+        val folders = FolderManager(context, crypto)
 
-        var photos = 0
-        var videos = 0
+        // Vault item counts — walk every category, classify by media type.
+        var photos = 0; var videos = 0; var pdfs = 0; var files = 0
         VaultCategory.entries.forEach { cat ->
-            vault.listPhotos(cat).forEach { item ->
-                if (item.mediaType == VaultMediaType.VIDEO) videos++ else photos++
+            try {
+                vault.listPhotos(cat).forEach { item ->
+                    when (item.mediaType) {
+                        VaultMediaType.VIDEO -> videos++
+                        VaultMediaType.PDF -> pdfs++
+                        VaultMediaType.FILE -> files++
+                        VaultMediaType.PHOTO -> photos++
+                    }
+                }
+            } catch (e: Exception) { Log.w(TAG, "stats: list $cat failed: ${e.message}") }
+        }
+
+        // OCR sidecars — count `.ocr.enc` files anywhere in vault/.
+        val vaultDir = File(context.filesDir, "vault")
+        var ocrSidecars = 0
+        var totalSize = 0L
+        if (vaultDir.exists()) {
+            vaultDir.walkTopDown().filter { it.isFile }.forEach { f ->
+                totalSize += f.length()
+                if (f.name.endsWith(".ocr.enc")) ocrSidecars++
             }
         }
-        val notes = noteRepo.noteCount()
 
-        val vaultDir = File(context.filesDir, "vault")
-        var totalSize = 0L
-        vaultDir.walkTopDown().filter { it.isFile }.forEach { totalSize += it.length() }
+        // Each module wrapped in try/catch — a corrupt repo for one feature
+        // shouldn't blank out the whole summary.
+        val notes = try { noteRepo.noteCount() } catch (_: Exception) { 0 }
+        val reminders = try { insights.listScheduleItems().size } catch (_: Exception) { 0 }
+        val expenses = try { insights.listExpenses().size } catch (_: Exception) { 0 }
+        val health = try { insights.listHealthEntries().size } catch (_: Exception) { 0 }
+        val meds = try { insights.listMedications().size } catch (_: Exception) { 0 }
+        val cycle = try { insights.listCycleEntries().size } catch (_: Exception) { 0 }
+        val habits = try { insights.loadHabits().size } catch (_: Exception) { 0 }
+        val contactsCount = try { contacts.listContacts().size } catch (_: Exception) { 0 }
+        val totpCount = try { totp.list().size } catch (_: Exception) { 0 }
+        val pwHints = try { passwordHints.listAll().size } catch (_: Exception) { 0 }
+        val starred = try { vault.listStarred().size } catch (_: Exception) { 0 }
+        val folderCount = try { folders.listAllFolders().size } catch (_: Exception) { 0 }
+        val trash = try { vault.trashCount() } catch (_: Exception) { 0 }
 
-        return BackupStats(photos, videos, notes, totalSize)
+        return BackupStats(
+            photoCount = photos,
+            videoCount = videos,
+            pdfCount = pdfs,
+            fileCount = files,
+            ocrSidecarCount = ocrSidecars,
+            starredCount = starred,
+            folderCount = folderCount,
+            trashCount = trash,
+            noteCount = notes,
+            reminderCount = reminders,
+            expenseCount = expenses,
+            healthCount = health,
+            medicationCount = meds,
+            cycleCount = cycle,
+            habitCount = habits,
+            contactCount = contactsCount,
+            totpCount = totpCount,
+            passwordHintCount = pwHints,
+            totalSizeBytes = totalSize
+        )
     }
 
     /**
@@ -124,10 +216,16 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
         zos.write(wrappedKeyData)
         zos.closeEntry()
 
-        // Write vault files preserving directory structure
+        // Write vault files preserving directory structure.
+        // Critically, preserve each file's mtime into the ZipEntry — VaultPhoto
+        // grouping ("Today", "This Week", etc.) reads file.lastModified(), and
+        // for fresh-import photos that mtime was set to the EXIF dateTaken at
+        // import time. Without this, restored photos all collapse into one
+        // group ("now"), losing date-based gallery navigation.
         allFiles.forEachIndexed { index, file ->
             val relativePath = file.relativeTo(context.filesDir).path.replace('\\', '/')
-            zos.putNextEntry(ZipEntry(relativePath))
+            val entry = ZipEntry(relativePath).apply { time = file.lastModified() }
+            zos.putNextEntry(entry)
             FileInputStream(file).use { fis ->
                 fis.copyTo(zos)
             }
@@ -135,8 +233,14 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
             onProgress(index + 1, totalFiles, "Backing up files...")
         }
 
-        // Write SQLCipher database (contacts + photo_index) if it exists
-        val dbFile = context.getDatabasePath("privora.db")
+        // Write SQLCipher database (contacts + photo_index + AI tags +
+        // descriptions) if it exists. Path must match PrivoraDatabase's actual
+        // location: <filesDir>/vault/privora.db, NOT context.getDatabasePath()
+        // (which points to <filesDir>/databases/ and is never populated).
+        // The wrong path silently produced backups missing the DB entirely —
+        // users who ran "Process all photos with AI" then restored were
+        // losing every Gemma description + AI tag.
+        val dbFile = File(File(context.filesDir, "vault"), "privora.db")
         if (dbFile.exists()) {
             // Close the database before copying to avoid corruption
             try { PrivoraDatabase.closeInstance() } catch (_: Exception) {}
@@ -144,6 +248,8 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
             FileInputStream(dbFile).use { fis -> fis.copyTo(zos) }
             zos.closeEntry()
             Log.i(TAG, "Database backed up: ${dbFile.length() / 1024}KB")
+        } else {
+            Log.w(TAG, "DB file missing at ${dbFile.absolutePath} — backup will not include photo_index / contacts")
         }
 
         // Write SharedPreferences as JSON entries
@@ -261,15 +367,19 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
                 fileIndex++
 
                 if (entry.name.startsWith("__database__/")) {
-                    // SQLCipher database (contacts + photo_index) — stream to databases dir
+                    // SQLCipher database (contacts + photo_index + Gemma
+                    // descriptions + AI tags) — restored to PrivoraDatabase's
+                    // actual location <filesDir>/vault/privora.db (NOT the
+                    // Android default databases/ dir). Wrong path was the bug
+                    // that lost AI tags on restore.
                     try {
                         val dbName = entry.name.removePrefix("__database__/")
-                        val dbFile = context.getDatabasePath(dbName)
+                        val dbFile = File(File(context.filesDir, "vault"), dbName)
                         // Close existing DB before overwriting
                         try { PrivoraDatabase.closeInstance() } catch (_: Exception) {}
                         dbFile.parentFile?.mkdirs()
                         dbFile.outputStream().use { out -> zis.copyTo(out, bufferSize = 8192) }
-                        Log.i(TAG, "Database restored: $dbName (${dbFile.length() / 1024}KB)")
+                        Log.i(TAG, "Database restored: $dbName (${dbFile.length() / 1024}KB) to ${dbFile.absolutePath}")
                         imported++
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to restore database: ${entry.name}: ${e.message}")
@@ -307,6 +417,13 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
                             targetFile.outputStream().use { out ->
                                 zis.copyTo(out, bufferSize = 8192)
                             }
+                            // Carry the original mtime forward so VaultPhoto's
+                            // date-grouping doesn't collapse all restored files
+                            // into "Today". Backups created before this fix
+                            // shipped have entry.time = backup-creation-time;
+                            // the post-import sidecar pass below corrects those.
+                            val zipMtime = entry.time
+                            if (zipMtime > 0) targetFile.setLastModified(zipMtime)
                             imported++
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to extract: ${entry.name}: ${e.message}")
@@ -319,6 +436,39 @@ class BackupManager(private val context: Context, private val crypto: CryptoMana
                 zis.closeEntry()
                 entry = zis.nextEntry
             }
+        }
+
+        // Belt-and-suspenders for backups created before mtime preservation
+        // shipped: walk the vault dir and re-apply each photo's `dateTaken`
+        // from its `.meta.enc` sidecar to the corresponding file mtimes.
+        // Cheap (only the small encrypted JSON sidecars get decrypted) and
+        // catches the case where the ZipEntry mtime was the backup-creation
+        // time rather than the original capture date.
+        try {
+            val fixed = VaultRepository(context, crypto).restorePhotoTimestampsFromMetadata()
+            if (fixed > 0) Log.i(TAG, "Reapplied dateTaken to mtime for $fixed photos")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to reapply photo mtimes from sidecars: ${e.message}")
+        }
+
+        // AI Assistant self-heal:
+        //  (a) Old backups (pre-fix) didn't include `gemma_settings` — after restore,
+        //      the model file is on disk but `ai_enabled` is unset, so the Assistant
+        //      stays hidden with no obvious recovery path. If the model is present,
+        //      auto-enable.
+        //  (b) Crash flags (`load_crashed`, `vision_crashed`) are device-specific —
+        //      a flag set on the source phone (e.g. an OpenCL crash) shouldn't
+        //      transfer to the target phone where Gemma may load fine. Clear both.
+        try {
+            if (com.privateai.camera.bridge.GemmaRunner.isModelDownloaded(context) &&
+                !com.privateai.camera.bridge.GemmaRunner.isEnabled(context)) {
+                com.privateai.camera.bridge.GemmaRunner.setEnabled(context, true)
+                Log.i(TAG, "Re-enabled AI Assistant (model present, flag was unset post-restore)")
+            }
+            com.privateai.camera.bridge.GemmaRunner.resetCrashFlag(context)
+            com.privateai.camera.bridge.GemmaRunner.resetVisionCrashFlag(context)
+        } catch (e: Exception) {
+            Log.w(TAG, "AI Assistant self-heal failed: ${e.message}")
         }
 
         Log.i(TAG, "Backup imported: $imported files, $skipped skipped" +

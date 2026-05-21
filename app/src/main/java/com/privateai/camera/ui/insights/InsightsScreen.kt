@@ -20,8 +20,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.FitnessCenter
-import androidx.compose.material.icons.filled.LocalPharmacy
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -212,11 +210,11 @@ fun InsightsScreen(onBack: (() -> Unit)? = null, initialTab: Int = 0, filterPers
         return
     }
 
-    // Unlocked — show tabs (Schedule promoted to top-level Reminders feature in Phase G)
+    // Unlocked — show tabs. Vitals + Medications moved to the top-level Health
+    // feature; Schedule is its own top-level Reminders feature. Insights now
+    // hosts only the two cross-cutting trackers that don't belong in Health.
     val tabs = listOf(
         stringResource(R.string.tab_expenses) to Icons.Default.AttachMoney,
-        stringResource(R.string.tab_health) to Icons.Default.FitnessCenter,
-        stringResource(R.string.tab_medications) to Icons.Default.LocalPharmacy,
         stringResource(R.string.tab_habits) to Icons.Default.CheckCircle
     )
 
@@ -261,11 +259,6 @@ fun InsightsScreen(onBack: (() -> Unit)? = null, initialTab: Int = 0, filterPers
         else SELF_PROFILE_ID
     }
     var selectedProfileId by remember { mutableStateOf(initialProfileId) }
-
-    // Callback that HealthTab can call to refresh the shared profiles list
-    val refreshProfiles: () -> Unit = {
-        profiles = try { repo.loadProfiles() } catch (_: Exception) { emptyList() }
-    }
 
     // Contact picker dialog state for linking a new profile
     var showLinkDialog by remember { mutableStateOf(false) }
@@ -348,9 +341,7 @@ fun InsightsScreen(onBack: (() -> Unit)? = null, initialTab: Int = 0, filterPers
                     when (selectedTab) {
                         // Expenses always uses self — pass SELF_PROFILE_ID so user-side filter is moot.
                         0 -> ExpensesTab(repo, selectedProfileId = SELF_PROFILE_ID)
-                        1 -> HealthTab(repo, selectedProfileId = selectedProfileId, onProfilesChanged = refreshProfiles)
-                        2 -> MedicationsTab(repo, selectedProfileId = selectedProfileId)
-                        3 -> HabitsTab(repo, selectedProfileId = selectedProfileId)
+                        1 -> HabitsTab(repo, selectedProfileId = selectedProfileId)
                     }
                 }
             }

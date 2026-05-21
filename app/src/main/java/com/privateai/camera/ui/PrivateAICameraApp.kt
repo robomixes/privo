@@ -22,8 +22,12 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.privateai.camera.MainActivity
+import com.privateai.camera.ui.calibrate.CalibrationWizardScreen
+import com.privateai.camera.ui.calibrate.isWizardComplete
+import com.privateai.camera.ui.calibrate.markWizardComplete
 import com.privateai.camera.ui.camera.CameraScreen
 import com.privateai.camera.ui.camera.CaptureScreen
+import com.privateai.camera.ui.health.HealthScreen
 import com.privateai.camera.ui.home.HomeScreen
 import com.privateai.camera.ui.assistant.AssistantScreen
 import com.privateai.camera.ui.home.PrivoraBottomTabs
@@ -43,19 +47,27 @@ import com.privateai.camera.ui.settings.FeatureToggleManager
 import com.privateai.camera.ui.settings.HomeLayout
 import com.privateai.camera.ui.settings.SettingsScreen
 import com.privateai.camera.ui.tools.UnitConverterScreen
+import com.privateai.camera.ui.totp.TotpListScreen
 import com.privateai.camera.ui.translate.TranslateScreen
 import com.privateai.camera.ui.vault.VaultScreen
 
 /** Top-level routes where the persistent bottom tab bar is shown (Tabs layout only). */
 private val TAB_VISIBLE_ROUTES = setOf(
-    "home", "vault", "notes", "insights", "reminders", "passwords", "contacts", "tools", "qrscanner", "translate", "detect", "scan"
+    "home", "vault", "notes", "insights", "health", "reminders", "passwords", "contacts", "tools", "qrscanner", "translate", "detect", "scan"
 )
 
 @Composable
 fun PrivateAICameraApp() {
     val context = LocalContext.current
     val navController = rememberNavController()
-    val startDest = if (isOnboardingComplete(context)) "home" else "onboarding"
+    // First-run flow: onboarding → calibration wizard → home. The wizard is also
+    // re-runnable from Settings; in that case PrivateAICameraApp doesn't pick it
+    // as the start destination — Settings navigates explicitly to "calibrate".
+    val startDest = when {
+        !isOnboardingComplete(context) -> "onboarding"
+        !isWizardComplete(context) -> "calibrate"
+        else -> "home"
+    }
 
     // Navigate to widget-requested destination after the NavHost is ready
     LaunchedEffect(Unit) {
@@ -114,7 +126,10 @@ fun PrivateAICameraApp() {
                 val importSummary = backStackEntry.savedStateHandle.get<String>("import_summary")
                 OnboardingScreen(
                     onComplete = {
-                        navController.navigate("home") {
+                        // After initial setup, route to the calibration wizard
+                        // (skipped on subsequent launches once it's been completed).
+                        val next = if (isWizardComplete(context)) "home" else "calibrate"
+                        navController.navigate(next) {
                             popUpTo("onboarding") { inclusive = true }
                         }
                     },
@@ -123,10 +138,26 @@ fun PrivateAICameraApp() {
                     },
                     importSummary = importSummary,
                     onCompleteWithSummary = { summary ->
-                        navController.navigate("home?summary=${android.net.Uri.encode(summary)}") {
+                        // If the wizard already ran (e.g. user re-imported a backup
+                        // that pre-included the wizard_completed flag), skip it.
+                        val target = if (isWizardComplete(context))
+                            "home?summary=${android.net.Uri.encode(summary)}"
+                        else
+                            "calibrate"
+                        navController.navigate(target) {
                             popUpTo("onboarding") { inclusive = true }
                         }
                     }
+                )
+            }
+            composable("calibrate") {
+                CalibrationWizardScreen(
+                    onFinish = {
+                        navController.navigate("home") {
+                            popUpTo("calibrate") { inclusive = true }
+                        }
+                    },
+                    onSetDuressPin = { navController.navigate("duress_setup") }
                 )
             }
             composable("home") {
@@ -155,6 +186,22 @@ fun PrivateAICameraApp() {
                 )
             }
             composable(
+                "assistant?seed={seed}&docId={docId}",
+                arguments = listOf(
+                    navArgument("seed") { defaultValue = ""; type = NavType.StringType },
+                    navArgument("docId") { defaultValue = ""; type = NavType.StringType }
+                )
+            ) { backStackEntry ->
+                val seed = backStackEntry.arguments?.getString("seed")?.ifBlank { null }
+                val docId = backStackEntry.arguments?.getString("docId")?.ifBlank { null }
+                AssistantScreen(
+                    onBack = safeBack,
+                    onNavigate = { route -> navController.navigate(route) },
+                    seedPrompt = seed,
+                    attachedDocId = docId
+                )
+            }
+            composable(
                 "notes?openNoteId={openNoteId}",
                 arguments = listOf(navArgument("openNoteId") { defaultValue = ""; type = NavType.StringType })
             ) { backStackEntry ->
@@ -174,19 +221,61 @@ fun PrivateAICameraApp() {
                 ScannerScreen(onBack = safeBack)
             }
             composable("qrscanner") {
-                QrScannerScreen(onBack = safeBack)
+                QrScannerScreen(
+                    onBack = safeBack,
+                    onOtpAuthScanned = { uri ->
+                        // Any scanned otpauth:// URI — regardless of where the user
+                        // entered the scanner — routes into the Authenticator add screen
+                        // pre-populated with the parsed entry.
+                        navController.navigate("totp?uri=${android.net.Uri.encode(uri)}") {
+                            popUpTo("qrscanner") { inclusive = true }
+                        }
+                    }
+                )
+            }
+            composable(
+                "qrscanner?otpOnly={otpOnly}",
+                arguments = listOf(navArgument("otpOnly") { defaultValue = "false"; type = NavType.StringType })
+            ) { backStackEntry ->
+                val otpOnly = backStackEntry.arguments?.getString("otpOnly") == "true"
+                QrScannerScreen(
+                    onBack = safeBack,
+                    onOtpAuthScanned = { uri ->
+                        navController.navigate("totp?uri=${android.net.Uri.encode(uri)}") {
+                            popUpTo("qrscanner?otpOnly={otpOnly}") { inclusive = true }
+                        }
+                    },
+                    otpAuthOnly = otpOnly
+                )
             }
             composable("translate") {
                 TranslateScreen(onBack = safeBack)
             }
             composable("vault") {
-                VaultScreen(onBack = safeBack)
+                VaultScreen(
+                    onBack = safeBack,
+                    onNavigate = { route -> navController.navigate(route) }
+                )
             }
             composable("vault?search={query}",
                 arguments = listOf(androidx.navigation.navArgument("query") { defaultValue = ""; type = androidx.navigation.NavType.StringType })
             ) { backStackEntry ->
                 val query = backStackEntry.arguments?.getString("query") ?: ""
-                VaultScreen(onBack = safeBack, initialSearchQuery = query)
+                VaultScreen(
+                    onBack = safeBack,
+                    initialSearchQuery = query,
+                    onNavigate = { route -> navController.navigate(route) }
+                )
+            }
+            composable("vault?openPhotoId={photoId}",
+                arguments = listOf(androidx.navigation.navArgument("photoId") { defaultValue = ""; type = androidx.navigation.NavType.StringType })
+            ) { backStackEntry ->
+                val photoId = backStackEntry.arguments?.getString("photoId")?.ifBlank { null }
+                VaultScreen(
+                    onBack = safeBack,
+                    initialOpenPhotoId = photoId,
+                    onNavigate = { route -> navController.navigate(route) }
+                )
             }
             composable("notes") {
                 NotesScreen(onBack = safeBack)
@@ -200,7 +289,21 @@ fun PrivateAICameraApp() {
             composable("insights") {
                 InsightsScreen(onBack = safeBack)
             }
-            composable("insights?personId={personId}&tab={tab}",
+            composable("insights?personId={personId}",
+                arguments = listOf(
+                    androidx.navigation.navArgument("personId") { defaultValue = ""; type = androidx.navigation.NavType.StringType }
+                )
+            ) { backStackEntry ->
+                val personId = backStackEntry.arguments?.getString("personId")?.ifBlank { null }
+                InsightsScreen(onBack = safeBack, filterPersonId = personId)
+            }
+            composable("health") {
+                HealthScreen(
+                    onBack = safeBack,
+                    onNavigateToPeople = { navController.navigate("contacts") }
+                )
+            }
+            composable("health?personId={personId}&tab={tab}",
                 arguments = listOf(
                     androidx.navigation.navArgument("personId") { defaultValue = ""; type = androidx.navigation.NavType.StringType },
                     androidx.navigation.navArgument("tab") { defaultValue = ""; type = androidx.navigation.NavType.StringType }
@@ -208,13 +311,36 @@ fun PrivateAICameraApp() {
             ) { backStackEntry ->
                 val personId = backStackEntry.arguments?.getString("personId")?.ifBlank { null }
                 val tab = backStackEntry.arguments?.getString("tab") ?: ""
-                InsightsScreen(onBack = safeBack, initialTab = if (tab == "health") 1 else 0, filterPersonId = personId)
+                val tabIndex = when (tab) { "meds", "medications" -> 1; "cycle" -> 2; else -> 0 }
+                HealthScreen(
+                    onBack = safeBack,
+                    initialTab = tabIndex,
+                    filterPersonId = personId,
+                    onNavigateToPeople = { navController.navigate("contacts") }
+                )
             }
             composable("reminders") {
                 RemindersScreen(onBack = safeBack)
             }
             composable("passwords") {
                 PasswordHintsScreen(onBack = safeBack)
+            }
+            composable(
+                "totp?uri={uri}",
+                arguments = listOf(navArgument("uri") { defaultValue = ""; type = NavType.StringType })
+            ) { backStackEntry ->
+                val uri = backStackEntry.arguments?.getString("uri")?.ifBlank { null }
+                TotpListScreen(
+                    onBack = safeBack,
+                    onScanQr = { navController.navigate("qrscanner?otpOnly=true") },
+                    seedFromUri = uri
+                )
+            }
+            composable("totp") {
+                TotpListScreen(
+                    onBack = safeBack,
+                    onScanQr = { navController.navigate("qrscanner?otpOnly=true") }
+                )
             }
             composable("tools") {
                 UnitConverterScreen(onBack = safeBack)
@@ -223,7 +349,10 @@ fun PrivateAICameraApp() {
                 com.privateai.camera.ui.contacts.ContactsScreen(
                     onBack = safeBack,
                     onNavigateToInsights = { personId ->
-                        navController.navigate("insights?personId=${personId ?: ""}&tab=health")
+                        // Contacts → "view their health" — the legacy callback name
+                        // says "Insights" but the destination is now the Health
+                        // feature (Vitals/Meds/Cycle live there).
+                        navController.navigate("health?personId=${personId ?: ""}&tab=")
                     },
                     onNavigateToNotes = { personId ->
                         navController.navigate("notes?personId=${personId ?: ""}")
@@ -238,8 +367,13 @@ fun PrivateAICameraApp() {
                     onBack = safeBack,
                     onBackupClick = { navController.navigate("backup") },
                     onDuressClick = { navController.navigate("duress_setup") },
-                    onChangePinClick = { navController.navigate("change_pin") }
+                    onChangePinClick = { navController.navigate("change_pin") },
+                    onRerunWizardClick = { navController.navigate("calibrate") },
+                    onOcrLanguagesClick = { navController.navigate("ocr_languages") }
                 )
+            }
+            composable("ocr_languages") {
+                com.privateai.camera.ui.settings.OcrLanguagesScreen(onBack = safeBack)
             }
             composable("duress_setup") {
                 DuressSetupScreen(onBack = safeBack)

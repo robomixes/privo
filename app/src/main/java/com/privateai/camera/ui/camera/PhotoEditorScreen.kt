@@ -113,6 +113,10 @@ fun PhotoEditorScreen(
     photo: VaultPhoto,
     initialBitmap: Bitmap,
     vault: VaultRepository,
+    /** Called after a successful save (NOT on back-without-save). The caller
+     *  uses this to stamp `PhotoIndex.markUpdated` so the Vault's
+     *  "Sort by updated date" mode sees the edit time. */
+    onSaved: ((String) -> Unit)? = null,
     onDone: () -> Unit
 ) {
     val context = LocalContext.current
@@ -214,7 +218,7 @@ fun PhotoEditorScreen(
                 IconButton(onClick = { scope.launch { withContext(Dispatchers.IO) { vault.savePhoto(buildFinal(), photo.category) }; Toast.makeText(context, "Saved as copy", Toast.LENGTH_SHORT).show() } }) {
                     Icon(Icons.Default.ContentCopy, "Copy")
                 }
-                if (hasChanges) IconButton(onClick = { scope.launch { withContext(Dispatchers.IO) { vault.replacePhoto(photo, buildFinal()) }; Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show(); onDone() } }) {
+                if (hasChanges) IconButton(onClick = { scope.launch { withContext(Dispatchers.IO) { vault.replacePhoto(photo, buildFinal()) }; onSaved?.invoke(photo.id); Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show(); onDone() } }) {
                     Icon(Icons.Default.Check, "Save", tint = MaterialTheme.colorScheme.primary)
                 }
             }

@@ -53,11 +53,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.privateai.camera.R
 import com.privateai.camera.security.BackupManager
 import com.privateai.camera.security.CryptoManager
 import com.privateai.camera.service.StorageManager
@@ -186,13 +188,57 @@ fun BackupScreen(onBack: (() -> Unit)? = null, onImportComplete: ((String) -> Un
 
                     Card(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp)) {
-                            Text("Your Data", style = MaterialTheme.typography.titleSmall)
+                            Text(stringResource(R.string.backup_your_data), style = MaterialTheme.typography.titleSmall)
                             Spacer(Modifier.height(8.dp))
-                            Text("${stats.photoCount} photos", style = MaterialTheme.typography.bodyMedium)
-                            Text("${stats.videoCount} videos", style = MaterialTheme.typography.bodyMedium)
-                            Text("${stats.noteCount} notes", style = MaterialTheme.typography.bodyMedium)
+                            // Render every module that has at least one item.
+                            // Modules with zero items are hidden so a fresh
+                            // device doesn't show a wall of "0 X / 0 Y / 0 Z".
+                            // Order roughly mirrors the home grid prominence.
+                            val rows: List<Pair<Int, Int>> = buildList {
+                                if (stats.photoCount > 0) add(stats.photoCount to R.string.backup_summary_photos)
+                                if (stats.videoCount > 0) add(stats.videoCount to R.string.backup_summary_videos)
+                                if (stats.pdfCount > 0) add(stats.pdfCount to R.string.backup_summary_pdfs)
+                                if (stats.fileCount > 0) add(stats.fileCount to R.string.backup_summary_files)
+                                if (stats.folderCount > 0) add(stats.folderCount to R.string.backup_summary_folders)
+                                if (stats.starredCount > 0) add(stats.starredCount to R.string.backup_summary_starred)
+                                if (stats.ocrSidecarCount > 0) add(stats.ocrSidecarCount to R.string.backup_summary_ocr)
+                                if (stats.noteCount > 0) add(stats.noteCount to R.string.backup_summary_notes)
+                                if (stats.reminderCount > 0) add(stats.reminderCount to R.string.backup_summary_reminders)
+                                if (stats.expenseCount > 0) add(stats.expenseCount to R.string.backup_summary_expenses)
+                                if (stats.healthCount > 0) add(stats.healthCount to R.string.backup_summary_health)
+                                if (stats.medicationCount > 0) add(stats.medicationCount to R.string.backup_summary_medications)
+                                if (stats.cycleCount > 0) add(stats.cycleCount to R.string.backup_summary_cycle)
+                                if (stats.habitCount > 0) add(stats.habitCount to R.string.backup_summary_habits)
+                                if (stats.contactCount > 0) add(stats.contactCount to R.string.backup_summary_contacts)
+                                if (stats.totpCount > 0) add(stats.totpCount to R.string.backup_summary_totp)
+                                if (stats.passwordHintCount > 0) add(stats.passwordHintCount to R.string.backup_summary_passwords)
+                                if (stats.trashCount > 0) add(stats.trashCount to R.string.backup_summary_trash)
+                            }
+                            if (rows.isEmpty()) {
+                                Text(
+                                    stringResource(R.string.backup_summary_empty),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                rows.forEach { (count, key) ->
+                                    Text(
+                                        stringResource(key, count),
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(8.dp))
                             Text(
-                                "Estimated size: ${StorageManager.formatSize(stats.totalSizeBytes)}",
+                                stringResource(R.string.backup_summary_size, StorageManager.formatSize(stats.totalSizeBytes)),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            // Prefs / settings carried with the backup —
+                            // user-facing reminder that toggles + UI prefs
+                            // travel along with the encrypted blobs.
+                            Text(
+                                stringResource(R.string.backup_summary_includes_settings),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -202,7 +248,7 @@ fun BackupScreen(onBack: (() -> Unit)? = null, onImportComplete: ((String) -> Un
                     Button(
                         onClick = { page = BackupPage.EXPORT },
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = stats.photoCount + stats.videoCount + stats.noteCount > 0
+                        enabled = !stats.isEmpty
                     ) {
                         Icon(Icons.Default.CloudUpload, null, Modifier.size(20.dp))
                         Text("  Export Backup")
@@ -395,7 +441,7 @@ fun BackupScreen(onBack: (() -> Unit)? = null, onImportComplete: ((String) -> Un
                             style = MaterialTheme.typography.bodyMedium
                         )
 
-                        if (stats.photoCount + stats.videoCount + stats.noteCount > 0) {
+                        if (!stats.isEmpty) {
                             Card(
                                 Modifier.fillMaxWidth(),
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)

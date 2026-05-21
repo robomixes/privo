@@ -1470,21 +1470,20 @@ private fun ContactEditorScreen(
                         scope.launch {
                             val contactId = contact?.id ?: UUID.randomUUID().toString()
                             kotlinx.coroutines.withContext(Dispatchers.IO) {
-                                // Try face detection + crop
+                                // Try face detection + crop. Track A1.2:
+                                // switched from ML Kit to the ONNX
+                                // FaceDetector. We pick the largest detected
+                                // face (most likely the contact's), expand
+                                // ~30% for breathing room, and crop.
                                 val croppedFace = try {
-                                    val faces = com.google.android.gms.tasks.Tasks.await(
-                                        com.google.mlkit.vision.face.FaceDetection.getClient().process(
-                                            com.google.mlkit.vision.common.InputImage.fromBitmap(bitmap, 0)
-                                        )
-                                    )
-                                    if (faces.isNotEmpty()) {
-                                        val bounds = faces[0].boundingBox
-                                        // Expand bounds for better framing
-                                        val expand = (bounds.width() * 0.3f).toInt()
-                                        val left = (bounds.left - expand).coerceAtLeast(0)
-                                        val top = (bounds.top - expand).coerceAtLeast(0)
-                                        val right = (bounds.right + expand).coerceAtMost(bitmap.width)
-                                        val bottom = (bounds.bottom + expand).coerceAtMost(bitmap.height)
+                                    val faces = com.privateai.camera.bridge.FaceDetectorHolder.get(context).detect(bitmap)
+                                    val biggest = faces.maxByOrNull { it.width * it.height }
+                                    if (biggest != null) {
+                                        val expand = (biggest.width * 0.3f).toInt()
+                                        val left = (biggest.left - expand).coerceAtLeast(0)
+                                        val top = (biggest.top - expand).coerceAtLeast(0)
+                                        val right = (biggest.right + expand).coerceAtMost(bitmap.width)
+                                        val bottom = (biggest.bottom + expand).coerceAtMost(bitmap.height)
                                         Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
                                     } else null
                                 } catch (_: Exception) { null }

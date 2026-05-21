@@ -1,12 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Anas
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-package com.privateai.camera.ui.insights
+package com.privateai.camera.ui.health
 
-import android.content.Intent
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +19,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
@@ -30,7 +26,6 @@ import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
@@ -39,7 +34,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -58,28 +52,26 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
 import com.privateai.camera.R
 import com.privateai.camera.security.HealthEntry
-import com.privateai.camera.security.HealthProfile
 import com.privateai.camera.security.InsightsRepository
 import com.privateai.camera.security.MOOD_EMOJIS
-import java.io.File
+import com.privateai.camera.ui.insights.ExportDialog
+import com.privateai.camera.ui.insights.LineChart
+import com.privateai.camera.ui.insights.SELF_PROFILE_ID
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-private val PROFILE_EMOJIS = listOf("👤", "👶", "👦", "👧", "👨", "👩", "👴", "👵", "🐶", "🐱")
-
 @Composable
-fun HealthTab(
+fun VitalsTab(
     repo: InsightsRepository,
     selectedProfileId: String = SELF_PROFILE_ID,
     onProfilesChanged: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    var profiles by remember { mutableStateOf(repo.loadProfiles()) }
+    val profiles by remember { mutableStateOf(repo.loadProfiles()) }
     var allEntries by remember { mutableStateOf(repo.listHealthEntries()) }
     var showAddDialog by remember { mutableStateOf(false) }
-    var showProfileDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()) }
 
@@ -108,11 +100,8 @@ fun HealthTab(
         })
     }
 
-    // (AddProfileDialog removed — add/link now handled by shared ProfileFilter at top of Insights)
-
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            // (Profile add/remove moved to shared ProfileFilter at top of InsightsScreen)
             item {
                 Row(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -231,7 +220,7 @@ fun HealthTab(
 private fun AddHealthDialog(onDismiss: () -> Unit, onSave: (HealthEntry) -> Unit) {
     var weight by remember { mutableStateOf("") }
     var sleep by remember { mutableFloatStateOf(7f) }
-    var pain by remember { mutableIntStateOf(0) }
+    val pain by remember { mutableIntStateOf(0) }
     var mood by remember { mutableIntStateOf(3) }
     var temp by remember { mutableStateOf("") }
     var steps by remember { mutableStateOf("") }
@@ -240,7 +229,6 @@ private fun AddHealthDialog(onDismiss: () -> Unit, onSave: (HealthEntry) -> Unit
     var diastolic by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
 
-    // Date/time — default to now, picker dialogs
     val context = LocalContext.current
     val cal = remember { Calendar.getInstance() }
     var selectedYear by remember { mutableIntStateOf(cal.get(Calendar.YEAR)) }
@@ -256,7 +244,6 @@ private fun AddHealthDialog(onDismiss: () -> Unit, onSave: (HealthEntry) -> Unit
         onDismissRequest = onDismiss, title = { Text(stringResource(R.string.health_log_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                // Date and time pickers
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = {
                         android.app.DatePickerDialog(context, { _, y, m, d -> selectedYear = y; selectedMonth = m; selectedDay = d }, selectedYear, selectedMonth, selectedDay).show()
@@ -295,62 +282,6 @@ private fun AddHealthDialog(onDismiss: () -> Unit, onSave: (HealthEntry) -> Unit
                 systolic = systolic.toIntOrNull(), diastolic = diastolic.toIntOrNull(), notes = notes.ifBlank { null }
             ))
         }) { Text(stringResource(R.string.action_save)) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } }
-    )
-}
-
-@Composable
-private fun AddProfileDialog(onDismiss: () -> Unit, onSave: (HealthProfile) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var icon by remember { mutableStateOf("👤") }
-    var linkedPersonId by remember { mutableStateOf<String?>(null) }
-    var linkedPersonName by remember { mutableStateOf<String?>(null) }
-    val context = LocalContext.current
-
-    // Load People contacts for linking
-    val contacts = remember {
-        try {
-            val crypto = com.privateai.camera.security.CryptoManager(context).also { it.initialize() }
-            com.privateai.camera.security.ContactRepository(java.io.File(context.filesDir, "vault/contacts"), crypto, com.privateai.camera.security.PrivoraDatabase.getInstance(context, crypto)).listContacts()
-        } catch (_: Exception) { emptyList() }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss, title = { Text(stringResource(R.string.health_add_profile)) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text(stringResource(R.string.label_name)) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                Text(stringResource(R.string.label_icon))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PROFILE_EMOJIS.forEach { e -> Text(e, fontSize = if (icon == e) 32.sp else 22.sp, modifier = Modifier.clickable { icon = e }.padding(4.dp)) }
-                }
-                // Link to People
-                if (contacts.isNotEmpty()) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.1f))
-                    if (linkedPersonName != null) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Linked to: $linkedPersonName", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                            TextButton(onClick = { linkedPersonId = null; linkedPersonName = null }) { Text("Remove", style = MaterialTheme.typography.labelSmall) }
-                        }
-                    } else {
-                        Text("Link to Person", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        contacts.take(5).forEach { person ->
-                            Row(
-                                Modifier.fillMaxWidth().clickable {
-                                    linkedPersonId = person.id; linkedPersonName = person.name
-                                    if (name.isBlank()) name = person.name
-                                }.padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text(person.name, style = MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = { if (name.isNotBlank()) onSave(HealthProfile(name = name, icon = icon, personId = linkedPersonId)) }, enabled = name.isNotBlank()) { Text(stringResource(R.string.action_add)) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } }
     )
 }
